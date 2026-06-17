@@ -47,7 +47,8 @@ class Config:
     polymarket_api_secret: str = field(default_factory=lambda: _require("POLYMARKET_API_SECRET"))
     polymarket_api_passphrase: str = field(default_factory=lambda: _require("POLYMARKET_API_PASSPHRASE"))
 
-    # AI
+    # AI — use Groq (free) or Anthropic
+    groq_api_key: str = field(default_factory=lambda: _require("GROQ_API_KEY"))
     anthropic_api_key: str = field(default_factory=lambda: _require("ANTHROPIC_API_KEY"))
 
     # News
@@ -69,11 +70,12 @@ class Config:
     def validate(self) -> list[str]:
         """Return list of missing critical keys."""
         missing = []
-        if not self.anthropic_api_key:
-            missing.append("ANTHROPIC_API_KEY")
         if not self.robinhood_mcp_token:
             missing.append("ROBINHOOD_MCP_TOKEN (run get_robinhood_token.py)")
         return missing
+
+    def has_ai(self) -> bool:
+        return bool(self.groq_api_key or self.anthropic_api_key)
 
     def has_alpaca(self) -> bool:
         return bool(self.alpaca_api_key and self.alpaca_api_secret)

@@ -28,7 +28,7 @@ from strategies.eod_analyzer import run_once_and_print, format_ideas_report, run
 async def eod_mode(cfg) -> None:
     """Run end-of-day research and print tomorrow's trade ideas."""
     setup_logging(cfg.log_level)
-    ai       = AIAnalyzer(cfg.anthropic_api_key)
+    ai       = AIAnalyzer(groq_api_key=cfg.groq_api_key, api_key=cfg.anthropic_api_key)
     notifier = Notifier(cfg.telegram_bot_token, cfg.telegram_chat_id)
 
     logger.info("Running end-of-day market analysis...")
@@ -129,7 +129,7 @@ async def main(dry_run: bool = False, eod: bool = False) -> None:
     social_feed = SocialFeed(engine.social_queue)
 
     # --- AI ---
-    ai = AIAnalyzer(cfg.anthropic_api_key)
+    ai = AIAnalyzer(groq_api_key=cfg.groq_api_key, api_key=cfg.anthropic_api_key)
 
     market_open_fn = lambda: engine.market_open  # noqa: E731
 

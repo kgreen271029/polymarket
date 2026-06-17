@@ -1,14 +1,10 @@
 """
 analysis/ai_analyzer.py
 
-Claude API integration for trade signal validation.
-Each strategy routes to the most cost-effective model capable of the task.
+AI trade signal validation — uses Groq (free) with Llama 3.3 70B.
+Falls back to rule-based scoring if no API key is set.
 
-Strategy → Model mapping
-    crypto_scalper / momentum  →  claude-haiku-4-5-20251001   (sub-100ms budget)
-    news_momentum / swing /
-    polymarket                 →  claude-sonnet-4-6            (richer reasoning)
-    new_coin_analysis          →  claude-sonnet-4-6 + adaptive thinking
+Get a free Groq key at: groq.com (no credit card, 14,400 req/day free)
 """
 
 from __future__ import annotations
@@ -19,85 +15,55 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from anthropic import AsyncAnthropic
 from loguru import logger
 
 # ---------------------------------------------------------------------------
-# Dataclasses
+# Dataclasses (unchanged interface)
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class AnalysisContext:
-    """Everything Claude needs to validate a trade signal."""
+    """Everything the AI needs to validate a trade signal."""
 
     symbol: str
-    asset_class: str                  # e.g. "crypto", "equity", "prediction_market"
-    strategy_name: str                # must match one of the routing keys below
-    proposed_action: str              # "BUY" | "SELL" | "HOLD"
-    signal_summary: dict              # output of TechnicalAnalyzer.build_signal_summary()
-    news_headlines: list[str]         # pre-formatted headline strings
-    available_capital: float          # USD
+    asset_class: str
+    strategy_name: str
+    proposed_action: str
+    signal_summary: dict
+    news_headlines: list[str]
+    available_capital: float
     open_position_count: int
-    daily_pnl_pct: float              # today's realised P&L as a percentage
+    daily_pnl_pct: float
 
 
 @dataclass
 class AIDecision:
-    """Structured trade recommendation returned by AIAnalyzer.analyze()."""
+    """Structured trade recommendation."""
 
-    recommendation: str               # "BUY" | "SELL" | "HOLD"
-    confidence: str                   # "High" | "Medium" | "Low"
-    stop_price: Optional[float]       # None means caller should use default
+    recommendation: str          # "BUY" | "SELL" | "HOLD"
+    confidence: str              # "High" | "Medium" | "Low"
+    stop_price: Optional[float]
     take_profit: Optional[float]
     reasoning: str
     risk_factors: list[str] = field(default_factory=list)
-    news_relevance: str = "neutral"   # "positive" | "negative" | "neutral"
+    news_relevance: str = "neutral"
 
 
 # ---------------------------------------------------------------------------
-# Model routing
+# System prompt
 # ---------------------------------------------------------------------------
 
-_FAST_MODEL = "claude-haiku-4-5-20251001"
-_STANDARD_MODEL = "claude-sonnet-4-6"
-
-_FAST_STRATEGIES: frozenset[str] = frozenset(
-    {"crypto_scalper", "momentum", "scalper", "crypto_momentum"}
-)
-
-# ---------------------------------------------------------------------------
-# System prompt (cached via prompt caching)
-# ---------------------------------------------------------------------------
-
-_SYSTEM_PROMPT = """You are an expert quantitative trading analyst with deep experience in technical analysis, \
-news-driven trading, and risk management. Your role is to validate trade signals and provide \
-structured trade recommendations.
+_SYSTEM_PROMPT = """You are an expert quantitative trading analyst. Validate trade signals and return structured JSON.
 
 RULES:
-1. Always respond with a single valid JSON object — no markdown fences, no prose outside the JSON.
-2. The JSON must contain exactly these keys:
-   {
-     "recommendation": "BUY" | "SELL" | "HOLD",
-     "confidence":     "High" | "Medium" | "Low",
-     "stop_price":     <number or null>,
-     "take_profit":    <number or null>,
-     "reasoning":      "<1–3 sentences>",
-     "risk_factors":   ["<factor>", ...],
-     "news_relevance": "positive" | "negative" | "neutral"
-   }
-3. stop_price and take_profit must maintain a minimum 1.5 : 1 reward-to-risk ratio.
-   If you cannot identify a defensible stop, set both to null.
-4. Confidence mapping:
-   - "High"   → you have strong confluence across technicals, trend, and news.
-   - "Medium" → mixed signals; risk management is critical.
-   - "Low"    → signals are contradictory or data is sparse; default to HOLD.
-5. risk_factors is a list of short strings (max 5). Always include at least one.
-6. Never recommend a position size — that is the risk manager's job.
-7. If today's P&L is already down more than 3 %, lean toward HOLD unless signals are exceptional.
-8. Treat RSI > 75 as overbought and RSI < 25 as oversold relative to the proposed action.
-9. A volume_spike combined with a breakout_20 is a strong confirmation signal.
-10. When news_relevance is "negative", lower confidence by one tier unless technicals are overwhelmingly positive."""
+1. Always respond with a single valid JSON object — no markdown, no prose outside JSON.
+2. Required keys:
+   {"recommendation":"BUY"|"SELL"|"HOLD","confidence":"High"|"Medium"|"Low","stop_price":<number|null>,"take_profit":<number|null>,"reasoning":"1-2 sentences","risk_factors":["..."],"news_relevance":"positive"|"negative"|"neutral"}
+3. stop_price and take_profit must give at least 1.5:1 reward-to-risk ratio.
+4. High = strong confluence across technicals+trend+news. Medium = mixed. Low = contradictory → HOLD.
+5. RSI>75 overbought, RSI<25 oversold. Volume spike + breakout_20 = strong confirmation.
+6. If daily P&L already down >3%, lean HOLD unless signals are exceptional."""
 
 
 # ---------------------------------------------------------------------------
@@ -107,153 +73,143 @@ RULES:
 
 class AIAnalyzer:
     """
-    Validates trade signals using Claude.
+    Validates trade signals using Groq's free Llama 3.3 70B model.
+    Falls back to rule-based HOLD if no API key or on any error.
 
-    Thread-safe for concurrent async use. A class-level semaphore caps
-    simultaneous in-flight requests at 3 to avoid API rate-limit errors.
+    Get a free key: groq.com → sign up → API Keys → Create
+    Add to .env: GROQ_API_KEY=gsk_...
     """
 
     _semaphore: asyncio.Semaphore = asyncio.Semaphore(3)
 
-    def __init__(self, api_key: str) -> None:
-        self._client = AsyncAnthropic(api_key=api_key)
+    def __init__(self, api_key: str = "", groq_api_key: str = "") -> None:
+        self._groq_key = groq_api_key
+        self._client = None
 
-        # System prompt stored as a content block with prompt caching enabled.
-        # The first request in each billing period pays for caching;
-        # subsequent requests reuse the cached version at ~10 % of the token cost.
-        self._system: list[dict] = [
-            {
-                "type": "text",
-                "text": _SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ]
+        if self._groq_key:
+            try:
+                from groq import AsyncGroq
+                self._client = AsyncGroq(api_key=self._groq_key)
+                logger.info("[AI] Using Groq (free) — llama-3.3-70b-versatile")
+            except ImportError:
+                logger.warning("[AI] groq package not installed — run: pip install groq")
+        else:
+            logger.warning("[AI] No GROQ_API_KEY set — AI analysis disabled, using rule-based fallback")
+
+    def _available(self) -> bool:
+        return self._client is not None
 
     # ------------------------------------------------------------------ #
     # Public interface                                                      #
     # ------------------------------------------------------------------ #
 
     async def analyze(self, context: AnalysisContext) -> AIDecision:
-        """
-        Validate a trade signal and return a structured AIDecision.
+        """Validate a trade signal. Returns HOLD on any failure."""
+        if not self._available():
+            return self._rule_based_decision(context)
 
-        Falls back to AIDecision(recommendation="HOLD", confidence="Low", ...)
-        on API timeout (>10 s) or JSON parse failure.
-        """
-        model = (
-            _FAST_MODEL
-            if context.strategy_name in _FAST_STRATEGIES
-            else _STANDARD_MODEL
-        )
-        user_message = self._build_user_message(context)
-
+        user_msg = self._build_user_message(context)
         try:
             async with self.__class__._semaphore:
-                response = await asyncio.wait_for(
-                    self._client.messages.create(
-                        model=model,
-                        max_tokens=512,
-                        system=self._system,
-                        messages=[{"role": "user", "content": user_message}],
-                    ),
-                    timeout=10.0,
-                )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "AIAnalyzer.analyze: timeout for {} {} — returning HOLD",
-                context.symbol,
-                context.strategy_name,
-            )
-            return self._hold_fallback("Request timed out after 10 s")
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(
-                "AIAnalyzer.analyze: unexpected error for {} — returning HOLD: {}",
-                context.symbol,
-                exc,
-            )
-            return self._hold_fallback(f"API error: {exc}")
-
-        raw_text = response.content[0].text if response.content else ""
-        return self._parse_response(raw_text, context.symbol)
-
-    async def analyze_new_coin(
-        self,
-        coin_data: dict,
-        social_data: dict,
-    ) -> dict:
-        """
-        Deep-research analysis of a newly listed coin using extended (adaptive) thinking.
-
-        Args:
-            coin_data:   Keys expected: name, symbol, contract_address, launch_date,
-                         market_cap_usd, liquidity_usd, holders, description.
-            social_data: Keys expected: twitter_followers, telegram_members,
-                         reddit_subscribers, mention_velocity_1h, avg_sentiment.
-
-        Returns:
-            {
-                "score":                int (0–100),
-                "reasoning":            str,
-                "risks":                list[str],
-                "entry_recommendation": bool,
-            }
-        """
-        prompt = self._build_new_coin_prompt(coin_data, social_data)
-
-        try:
-            async with self.__class__._semaphore:
-                response = await asyncio.wait_for(
-                    self._client.messages.create(
-                        model=_STANDARD_MODEL,
-                        max_tokens=2048,
-                        thinking={"type": "adaptive"},
+                resp = await asyncio.wait_for(
+                    self._client.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
                         messages=[
-                            {
-                                "role": "user",
-                                "content": prompt,
-                            }
+                            {"role": "system", "content": _SYSTEM_PROMPT},
+                            {"role": "user", "content": user_msg},
                         ],
+                        max_tokens=512,
+                        temperature=0.1,
                     ),
-                    timeout=60.0,
+                    timeout=15.0,
                 )
+            raw = resp.choices[0].message.content or ""
+            return self._parse_response(raw, context.symbol)
         except asyncio.TimeoutError:
-            logger.warning(
-                "AIAnalyzer.analyze_new_coin: timeout for {} — skipping",
-                coin_data.get("symbol", "UNKNOWN"),
-            )
-            return {
-                "score": 0,
-                "reasoning": "Analysis timed out.",
-                "risks": ["timeout"],
-                "entry_recommendation": False,
-            }
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(
-                "AIAnalyzer.analyze_new_coin error for {}: {}",
-                coin_data.get("symbol", "UNKNOWN"),
-                exc,
-            )
-            return {
-                "score": 0,
-                "reasoning": f"API error: {exc}",
-                "risks": ["api_error"],
-                "entry_recommendation": False,
-            }
+            logger.warning("[AI] Timeout for {} — using rule-based fallback", context.symbol)
+            return self._rule_based_decision(context)
+        except Exception as e:
+            logger.warning("[AI] Error for {}: {} — using rule-based fallback", context.symbol, e)
+            return self._rule_based_decision(context)
 
-        # The model may emit thinking blocks before the text block.
-        text_block = next(
-            (b for b in response.content if b.type == "text"),
-            None,
+    async def analyze_new_coin(self, coin_data: dict, social_data: dict) -> dict:
+        """Score a new coin listing 0-10."""
+        if not self._available():
+            return {"score": 0, "reasoning": "AI not configured", "risks": ["no_ai"], "entry_recommendation": False}
+
+        prompt = (
+            "Score this new crypto coin 0-100 as a trading opportunity. "
+            "Respond with JSON only: {\"score\":int,\"reasoning\":\"2 sentences\",\"risks\":[\"...\"],\"entry_recommendation\":bool}\n\n"
+            f"Coin: {coin_data.get('name')} ({coin_data.get('symbol')})\n"
+            f"Days old: {coin_data.get('days_old')}, Trending rank: {coin_data.get('trending_rank')}\n"
+            f"Social velocity: {social_data.get('social_velocity')}x"
         )
-        if text_block is None:
+        try:
+            async with self.__class__._semaphore:
+                resp = await asyncio.wait_for(
+                    self._client.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=256,
+                        temperature=0.1,
+                    ),
+                    timeout=15.0,
+                )
+            raw = resp.choices[0].message.content or ""
+            cleaned = self._extract_json(raw)
+            data = json.loads(cleaned)
             return {
-                "score": 0,
-                "reasoning": "No text in response.",
-                "risks": ["empty_response"],
-                "entry_recommendation": False,
+                "score": int(data.get("score", 0)) // 10,  # convert 0-100 to 0-10
+                "reasoning": str(data.get("reasoning", "")),
+                "risks": list(data.get("risks", [])),
+                "entry_recommendation": bool(data.get("entry_recommendation", False)),
             }
+        except Exception as e:
+            logger.warning("[AI] analyze_new_coin error: {}", e)
+            return {"score": 0, "reasoning": str(e), "risks": ["error"], "entry_recommendation": False}
 
-        return self._parse_new_coin_response(text_block.text, coin_data.get("symbol", ""))
+    # ------------------------------------------------------------------ #
+    # Rule-based fallback (no API needed)                                  #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _rule_based_decision(ctx: AnalysisContext) -> AIDecision:
+        """
+        Pure technical rules when AI is unavailable.
+        Conservative — only BUYs on strong multi-factor confluence.
+        """
+        sig = ctx.signal_summary
+        rsi = sig.get("rsi", 50)
+        macd = sig.get("macd_direction", "neutral")
+        trend = sig.get("trend", "sideways")
+        vol = sig.get("volume_ratio", 1.0)
+        breakout = sig.get("breakout_20", False)
+        bb_pct = sig.get("bb_pct", 0.5)
+        price = sig.get("latest_close", 0)
+
+        score = 0
+        if trend == "uptrend":   score += 2
+        if macd == "bullish":    score += 2
+        if breakout:             score += 2
+        if vol > 1.5:            score += 1
+        if 40 < rsi < 65:        score += 1
+
+        if ctx.daily_pnl_pct < -3:
+            return AIDecision("HOLD", "Low", None, None,
+                              "Daily loss limit caution — rule-based hold", ["daily_loss_caution"])
+
+        if score >= 6 and ctx.proposed_action == "BUY":
+            stop = round(price * 0.96, 2)
+            target = round(price * 1.08, 2)
+            conf = "High" if score >= 7 else "Medium"
+            return AIDecision("BUY", conf, stop, target,
+                              f"Rule-based: score={score}/8, trend={trend}, MACD={macd}, vol={vol:.1f}x")
+        elif score <= 2:
+            return AIDecision("HOLD", "Low", None, None,
+                              f"Rule-based: weak signals, score={score}/8")
+        else:
+            return AIDecision("HOLD", "Low", None, None,
+                              f"Rule-based: insufficient confluence, score={score}/8")
 
     # ------------------------------------------------------------------ #
     # Message builders                                                     #
@@ -262,83 +218,24 @@ class AIAnalyzer:
     @staticmethod
     def _build_user_message(ctx: AnalysisContext) -> str:
         sig = ctx.signal_summary
-
-        rsi = sig.get("rsi", 50.0)
-        macd_hist = sig.get("macd_hist", 0.0)
-        macd_direction = sig.get("macd_direction", "neutral")
-        bb_pct = sig.get("bb_pct", 0.5)
-        vwap_delta_pct = sig.get("vwap_delta_pct", 0.0)
-        volume_ratio = sig.get("volume_ratio", 1.0)
-        volume_spike = sig.get("volume_spike", False)
-        trend = sig.get("trend", "sideways")
-        latest_close = sig.get("latest_close", 0.0)
-
-        if ctx.news_headlines:
-            headlines_text = "\n".join(
-                f"  • {h}" for h in ctx.news_headlines[:10]
-            )
-        else:
-            headlines_text = "  No relevant news"
-
+        headlines = "\n".join(f"  • {h}" for h in ctx.news_headlines[:8]) or "  None"
         return (
-            f"ASSET: {ctx.symbol} ({ctx.asset_class})\n"
-            f"STRATEGY: {ctx.strategy_name}\n"
-            f"PROPOSED: {ctx.proposed_action}\n"
-            "\n"
-            "TECHNICALS:\n"
-            f"  RSI(14): {rsi:.1f}\n"
-            f"  MACD histogram: {macd_hist:.4f} ({macd_direction})\n"
-            f"  Bollinger %: {bb_pct:.2f} (0=lower band, 1=upper band)\n"
-            f"  VWAP delta: {vwap_delta_pct:+.2f}%\n"
-            f"  Volume: {volume_ratio:.1f}x average  spike={volume_spike}\n"
-            f"  Trend: {trend}\n"
-            f"  Price: ${latest_close:.4f}\n"
-            "\n"
-            "NEWS (last 30 min):\n"
-            f"{headlines_text}\n"
-            "\n"
-            "PORTFOLIO:\n"
-            f"  Available: ${ctx.available_capital:.2f}\n"
-            f"  Open positions: {ctx.open_position_count}\n"
-            f"  Today P&L: {ctx.daily_pnl_pct:+.1f}%"
-        )
-
-    @staticmethod
-    def _build_new_coin_prompt(coin_data: dict, social_data: dict) -> str:
-        return (
-            "You are an expert crypto analyst specialising in newly launched tokens. "
-            "Analyse the following coin and social data, then respond with a single "
-            "valid JSON object (no markdown fences) containing exactly these keys:\n"
-            '  "score": integer 0–100 (overall opportunity score),\n'
-            '  "reasoning": string (2–4 sentences),\n'
-            '  "risks": list of strings (top 3–5 risks),\n'
-            '  "entry_recommendation": boolean\n\n'
-            "COIN DATA:\n"
-            f"  Name: {coin_data.get('name', 'N/A')}\n"
-            f"  Symbol: {coin_data.get('symbol', 'N/A')}\n"
-            f"  Contract: {coin_data.get('contract_address', 'N/A')}\n"
-            f"  Launch date: {coin_data.get('launch_date', 'N/A')}\n"
-            f"  Market cap: ${coin_data.get('market_cap_usd', 0):,.0f}\n"
-            f"  Liquidity: ${coin_data.get('liquidity_usd', 0):,.0f}\n"
-            f"  Holders: {coin_data.get('holders', 0):,}\n"
-            f"  Description: {coin_data.get('description', 'N/A')}\n\n"
-            "SOCIAL DATA:\n"
-            f"  Twitter followers: {social_data.get('twitter_followers', 0):,}\n"
-            f"  Telegram members: {social_data.get('telegram_members', 0):,}\n"
-            f"  Reddit subscribers: {social_data.get('reddit_subscribers', 0):,}\n"
-            f"  Mention velocity (1 h): {social_data.get('mention_velocity_1h', 0):.1f}x\n"
-            f"  Avg sentiment: {social_data.get('avg_sentiment', 0.0):+.2f}"
+            f"ASSET: {ctx.symbol} ({ctx.asset_class})  STRATEGY: {ctx.strategy_name}  ACTION: {ctx.proposed_action}\n\n"
+            f"TECHNICALS:\n"
+            f"  RSI={sig.get('rsi',50):.1f}  MACD={sig.get('macd_direction','?')}  BB%={sig.get('bb_pct',0.5):.2f}\n"
+            f"  VWAP_delta={sig.get('vwap_delta_pct',0):+.2f}%  Volume={sig.get('volume_ratio',1):.1f}x  Spike={sig.get('volume_spike',False)}\n"
+            f"  Trend={sig.get('trend','?')}  Breakout20={sig.get('breakout_20',False)}  Price=${sig.get('latest_close',0):.4f}\n\n"
+            f"NEWS:\n{headlines}\n\n"
+            f"PORTFOLIO: ${ctx.available_capital:.0f} available  {ctx.open_position_count} positions  P&L={ctx.daily_pnl_pct:+.1f}%"
         )
 
     # ------------------------------------------------------------------ #
-    # Response parsers                                                      #
+    # Parsers / helpers                                                     #
     # ------------------------------------------------------------------ #
 
     def _parse_response(self, raw: str, symbol: str) -> AIDecision:
-        """Parse Claude's JSON reply into an AIDecision, falling back to HOLD."""
-        cleaned = self._extract_json(raw)
         try:
-            data = json.loads(cleaned)
+            data = json.loads(self._extract_json(raw))
             return AIDecision(
                 recommendation=str(data.get("recommendation", "HOLD")).upper(),
                 confidence=str(data.get("confidence", "Low")),
@@ -348,75 +245,29 @@ class AIAnalyzer:
                 risk_factors=list(data.get("risk_factors", [])),
                 news_relevance=str(data.get("news_relevance", "neutral")),
             )
-        except (json.JSONDecodeError, KeyError, TypeError) as exc:
-            logger.warning(
-                "AIAnalyzer: failed to parse response for {} — {}: {!r}",
-                symbol,
-                exc,
-                raw[:200],
-            )
+        except Exception as e:
+            logger.warning("[AI] Parse error for {}: {} raw={!r}", symbol, e, raw[:150])
             return self._hold_fallback("JSON parse error")
-
-    def _parse_new_coin_response(self, raw: str, symbol: str) -> dict:
-        cleaned = self._extract_json(raw)
-        try:
-            data = json.loads(cleaned)
-            return {
-                "score": int(data.get("score", 0)),
-                "reasoning": str(data.get("reasoning", "")),
-                "risks": list(data.get("risks", [])),
-                "entry_recommendation": bool(data.get("entry_recommendation", False)),
-            }
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-            logger.warning(
-                "AIAnalyzer.analyze_new_coin: parse error for {} — {}: {!r}",
-                symbol,
-                exc,
-                raw[:200],
-            )
-            return {
-                "score": 0,
-                "reasoning": "Failed to parse model response.",
-                "risks": ["parse_error"],
-                "entry_recommendation": False,
-            }
-
-    # ------------------------------------------------------------------ #
-    # Helpers                                                              #
-    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _extract_json(text: str) -> str:
-        """Strip markdown code fences if present, then return the raw JSON."""
         text = text.strip()
-        # Remove ```json ... ``` or ``` ... ```
-        match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-        # Attempt to isolate the first {...} block
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            return text[start : end + 1]
+        m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+        s, e = text.find("{"), text.rfind("}")
+        if s != -1 and e > s:
+            return text[s:e + 1]
         return text
 
     @staticmethod
-    def _float_or_none(value: object) -> Optional[float]:
-        if value is None:
-            return None
+    def _float_or_none(v) -> Optional[float]:
         try:
-            return float(value)
+            return float(v) if v is not None else None
         except (TypeError, ValueError):
             return None
 
     @staticmethod
     def _hold_fallback(reason: str) -> AIDecision:
-        return AIDecision(
-            recommendation="HOLD",
-            confidence="Low",
-            stop_price=None,
-            take_profit=None,
-            reasoning=reason,
-            risk_factors=["fallback: unable to obtain valid analysis"],
-            news_relevance="neutral",
-        )
+        return AIDecision("HOLD", "Low", None, None, reason,
+                          ["fallback: analysis unavailable"], "neutral")
