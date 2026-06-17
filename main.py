@@ -71,7 +71,12 @@ async def main(dry_run: bool = False) -> None:
 
     # --- Brokers ---
     alpaca = AlpacaBroker(cfg.alpaca_api_key, cfg.alpaca_api_secret, engine.fill_queue)
-    robinhood = RobinhoodBroker(cfg.robinhood_mcp_token, engine.fill_queue)
+    robinhood = RobinhoodBroker(
+        cfg.robinhood_mcp_token,
+        engine.fill_queue,
+        refresh_token=cfg.robinhood_refresh_token,
+        client_id=cfg.robinhood_client_id,
+    )
     polymarket_broker = PolymarketBroker(
         cfg.polymarket_private_key,
         cfg.polymarket_api_key,

@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import urllib.parse
+import urllib.request
 from typing import Any
 
 import aiohttp
 from loguru import logger
 
-MCP_URL = "https://agent.robinhood.com/mcp/trading"
+MCP_URL      = "https://agent.robinhood.com/mcp/trading"
+TOKEN_URL    = "https://api.robinhood.com/oauth2/token/"
 _REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=15)
 
 
@@ -17,13 +19,22 @@ class RobinhoodBroker:
     """
     Calls the Robinhood Agentic MCP server using JSON-RPC 2.0 over HTTP.
 
-    Setup: Robinhood app → Settings → Agentic Trading → get Bearer token.
+    Setup: run get_robinhood_token.py locally once to get ROBINHOOD_MCP_TOKEN.
+    If the token expires, the broker auto-refreshes using ROBINHOOD_REFRESH_TOKEN.
     Reference: https://robinhood.com/us/en/support/articles/agentic-trading-overview/
     """
 
-    def __init__(self, mcp_token: str, fill_queue: asyncio.Queue) -> None:
-        self._token = mcp_token
-        self._fill_queue = fill_queue
+    def __init__(
+        self,
+        mcp_token: str,
+        fill_queue: asyncio.Queue,
+        refresh_token: str = "",
+        client_id: str = "",
+    ) -> None:
+        self._token        = mcp_token
+        self._refresh      = refresh_token
+        self._client_id    = client_id
+        self._fill_queue   = fill_queue
         self._session: aiohttp.ClientSession | None = None
         self._req_id = 0
 
@@ -38,8 +49,37 @@ class RobinhoodBroker:
             self._session = aiohttp.ClientSession(timeout=_REQUEST_TIMEOUT)
         return self._session
 
+    async def _refresh_token(self) -> bool:
+        """Attempt to refresh the access token using the stored refresh token."""
+        if not self._refresh or not self._client_id:
+            return False
+        try:
+            payload = urllib.parse.urlencode({
+                "grant_type":    "refresh_token",
+                "refresh_token": self._refresh,
+                "client_id":     self._client_id,
+            }).encode()
+            req  = urllib.request.Request(
+                TOKEN_URL, data=payload,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            resp = urllib.request.urlopen(req, timeout=10)
+            import json as _json
+            data = _json.loads(resp.read())
+            new_token = data.get("access_token")
+            if new_token:
+                self._token   = new_token
+                new_refresh   = data.get("refresh_token")
+                if new_refresh:
+                    self._refresh = new_refresh
+                logger.info("[RH] Token refreshed successfully")
+                return True
+        except Exception as e:
+            logger.error("[RH] Token refresh failed: {}", e)
+        return False
+
     async def _call_tool(self, tool_name: str, arguments: dict) -> dict:
-        """Execute a single MCP tool call via JSON-RPC 2.0."""
+        """Execute a single MCP tool call via JSON-RPC 2.0. Auto-refreshes on 401."""
         self._req_id += 1
         payload = {
             "jsonrpc": "2.0",
@@ -53,7 +93,17 @@ class RobinhoodBroker:
         }
         session = await self._get_session()
         async with session.post(MCP_URL, json=payload, headers=headers) as resp:
-            data = await resp.json()
+            if resp.status == 401:
+                logger.warning("[RH] 401 Unauthorized — attempting token refresh")
+                if await self._refresh_token():
+                    headers["Authorization"] = f"Bearer {self._token}"
+                    async with session.post(MCP_URL, json=payload, headers=headers) as resp2:
+                        data = await resp2.json()
+                else:
+                    logger.error("[RH] Token expired and refresh failed. Re-run get_robinhood_token.py")
+                    raise RuntimeError("Robinhood token expired — re-run get_robinhood_token.py")
+            else:
+                data = await resp.json()
 
         if "error" in data:
             raise RuntimeError(f"MCP error calling {tool_name}: {data['error']}")

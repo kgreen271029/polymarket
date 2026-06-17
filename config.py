@@ -36,8 +36,10 @@ class Config:
     alpaca_api_key: str = field(default_factory=lambda: _require("ALPACA_API_KEY"))
     alpaca_api_secret: str = field(default_factory=lambda: _require("ALPACA_API_SECRET"))
 
-    # Robinhood Agentic MCP
+    # Robinhood Agentic MCP (run get_robinhood_token.py locally to get these)
     robinhood_mcp_token: str = field(default_factory=lambda: _require("ROBINHOOD_MCP_TOKEN"))
+    robinhood_refresh_token: str = field(default_factory=lambda: _require("ROBINHOOD_REFRESH_TOKEN"))
+    robinhood_client_id: str = field(default_factory=lambda: _require("ROBINHOOD_CLIENT_ID"))
 
     # Polymarket
     polymarket_private_key: str = field(default_factory=lambda: _require("POLYMARKET_PRIVATE_KEY"))
