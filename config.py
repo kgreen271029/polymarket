@@ -62,22 +62,30 @@ class Config:
     # System
     log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
 
+    # Notifications
+    telegram_bot_token: str = field(default_factory=lambda: _require("TELEGRAM_BOT_TOKEN"))
+    telegram_chat_id: str = field(default_factory=lambda: _require("TELEGRAM_CHAT_ID"))
+
     def validate(self) -> list[str]:
         """Return list of missing critical keys."""
         missing = []
-        if not self.alpaca_api_key:
-            missing.append("ALPACA_API_KEY")
-        if not self.alpaca_api_secret:
-            missing.append("ALPACA_API_SECRET")
         if not self.anthropic_api_key:
             missing.append("ANTHROPIC_API_KEY")
+        if not self.robinhood_mcp_token:
+            missing.append("ROBINHOOD_MCP_TOKEN (run get_robinhood_token.py)")
         return missing
+
+    def has_alpaca(self) -> bool:
+        return bool(self.alpaca_api_key and self.alpaca_api_secret)
 
     def has_robinhood(self) -> bool:
         return bool(self.robinhood_mcp_token)
 
     def has_polymarket(self) -> bool:
         return bool(self.polymarket_private_key)
+
+    def has_telegram(self) -> bool:
+        return bool(self.telegram_bot_token and self.telegram_chat_id)
 
 
 _config: Config | None = None

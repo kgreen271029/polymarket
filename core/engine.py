@@ -80,6 +80,7 @@ class TradingEngine:
         robinhood_broker: Any,
         polymarket_broker: Any,
         config: Any,
+        notifier: Any = None,
     ) -> None:
         self._portfolio = portfolio
         self._risk_manager = risk_manager
@@ -87,6 +88,7 @@ class TradingEngine:
         self._robinhood_broker = robinhood_broker
         self._polymarket_broker = polymarket_broker
         self._config = config
+        self._notifier = notifier
 
         self.signal_bus: asyncio.Queue[TradeSignal] = asyncio.Queue()
         self.news_queue: asyncio.Queue[HeadlineEvent] = asyncio.Queue()
@@ -181,14 +183,33 @@ class TradingEngine:
         )
 
         try:
-            if signal_obj.asset_class == "crypto":
+            if signal_obj.asset_class == "crypto" and self._alpaca_broker:
                 await asyncio.to_thread(self._alpaca_broker.submit_order, signal_obj)
-            elif signal_obj.asset_class == "stock":
-                await asyncio.to_thread(self._robinhood_broker.submit_order, signal_obj)
-            elif signal_obj.asset_class == "polymarket":
+            elif signal_obj.asset_class == "stock" and self._robinhood_broker:
+                await self._robinhood_broker.place_order(
+                    symbol=signal_obj.symbol,
+                    side=signal_obj.side,
+                    qty=signal_obj.qty,
+                    order_type="market",
+                )
+            elif signal_obj.asset_class == "polymarket" and self._polymarket_broker:
                 await asyncio.to_thread(self._polymarket_broker.submit_order, signal_obj)
             else:
-                logger.error("[ENGINE] Unknown asset_class '{}' — signal dropped", signal_obj.asset_class)
+                logger.error("[ENGINE] No broker available for asset_class '{}' — signal dropped", signal_obj.asset_class)
+                return
+
+            # Send trade alert notification
+            if self._notifier:
+                asyncio.create_task(self._notifier.trade_alert(
+                    symbol=signal_obj.symbol,
+                    side=signal_obj.side,
+                    qty=signal_obj.qty,
+                    price=signal_obj.entry_price,
+                    strategy=signal_obj.strategy_name,
+                    reasoning=signal_obj.reasoning or "",
+                    stop=signal_obj.stop_price,
+                    target=signal_obj.take_profit,
+                ))
         except Exception as exc:
             logger.exception(
                 "[ENGINE] Broker error routing {} {}: {}", signal_obj.symbol, signal_obj.asset_class, exc
