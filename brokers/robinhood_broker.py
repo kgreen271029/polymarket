@@ -31,12 +31,13 @@ class RobinhoodBroker:
         refresh_token: str = "",
         client_id: str = "",
     ) -> None:
-        self._token        = mcp_token
-        self._refresh      = refresh_token
-        self._client_id    = client_id
-        self._fill_queue   = fill_queue
+        self._token          = mcp_token
+        self._refresh        = refresh_token
+        self._client_id      = client_id
+        self._fill_queue     = fill_queue
         self._session: aiohttp.ClientSession | None = None
-        self._req_id = 0
+        self._req_id         = 0
+        self._account_number = ""
 
     def _available(self) -> bool:
         if not self._token:
@@ -78,69 +79,155 @@ class RobinhoodBroker:
             logger.error("[RH] Token refresh failed: {}", e)
         return False
 
+    @staticmethod
+    async def _parse_sse(resp: aiohttp.ClientResponse) -> dict:
+        """Read a Server-Sent Events response and return the first JSON-RPC result."""
+        import json as _json
+        async for raw_line in resp.content:
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+            if line.startswith("data:"):
+                payload = line[5:].strip()
+                if payload and payload != "[DONE]":
+                    try:
+                        return _json.loads(payload)
+                    except Exception:
+                        pass
+        return {}
+
     async def _call_tool(self, tool_name: str, arguments: dict) -> dict:
-        """Execute a single MCP tool call via JSON-RPC 2.0. Auto-refreshes on 401."""
+        """Execute a single MCP tool call. Handles both JSON and SSE (streaming) responses."""
         self._req_id += 1
-        payload = {
+        rpc_payload = {
             "jsonrpc": "2.0",
             "method": "tools/call",
             "params": {"name": tool_name, "arguments": arguments},
             "id": self._req_id,
         }
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "Content-Type": "application/json",
-        }
-        session = await self._get_session()
-        async with session.post(MCP_URL, json=payload, headers=headers) as resp:
-            if resp.status == 401:
-                logger.warning("[RH] 401 Unauthorized — attempting token refresh")
-                if await self._refresh_token():
-                    headers["Authorization"] = f"Bearer {self._token}"
-                    async with session.post(MCP_URL, json=payload, headers=headers) as resp2:
-                        data = await resp2.json()
-                else:
-                    logger.error("[RH] Token expired and refresh failed. Re-run get_robinhood_token.py")
-                    raise RuntimeError("Robinhood token expired — re-run get_robinhood_token.py")
+
+        async def _do_request(token: str) -> dict:
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            }
+            session = await self._get_session()
+            async with session.post(MCP_URL, json=rpc_payload, headers=headers) as resp:
+                if resp.status == 401:
+                    return {"__status": 401}
+                ct = resp.content_type or ""
+                if "event-stream" in ct:
+                    return await self._parse_sse(resp)
+                return await resp.json(content_type=None)
+
+        data = await _do_request(self._token)
+
+        if data.get("__status") == 401:
+            logger.warning("[RH] 401 Unauthorized — attempting token refresh")
+            if await self._refresh_token():
+                data = await _do_request(self._token)
             else:
-                data = await resp.json()
+                logger.error("[RH] Token expired and refresh failed. Re-run get_robinhood_token.py")
+                raise RuntimeError("Robinhood token expired — re-run get_robinhood_token.py")
 
         if "error" in data:
             raise RuntimeError(f"MCP error calling {tool_name}: {data['error']}")
-        return data.get("result", {})
+
+        # MCP wraps results in content array for tool calls
+        result = data.get("result", data)
+        if isinstance(result, dict) and "content" in result:
+            import json as _json
+            content = result["content"]
+            if isinstance(content, list) and content:
+                text = content[0].get("text", "")
+                try:
+                    return _json.loads(text)
+                except Exception:
+                    return {"text": text}
+        return result
 
     # ------------------------------------------------------------------
     # Read-only account tools
     # ------------------------------------------------------------------
 
+    async def get_account_number(self) -> str:
+        """Fetch the agentic brokerage account number (cached after first call)."""
+        if self._account_number:
+            return self._account_number
+        try:
+            result = await self._call_tool("get_accounts", {})
+            data = result.get("data", result) if isinstance(result, dict) else {}
+            accounts = data.get("accounts", []) if isinstance(data, dict) else []
+            if not isinstance(accounts, list):
+                accounts = []
+            # Prefer agentic_allowed account, fall back to default
+            agentic = next((a for a in accounts if a.get("agentic_allowed")), None)
+            chosen = agentic or next((a for a in accounts if a.get("is_default")), None) or (accounts[0] if accounts else None)
+            if chosen:
+                self._account_number = chosen.get("account_number", "")
+                logger.info("[RH] Using account {} ({})", self._account_number, chosen.get("nickname") or chosen.get("type", ""))
+            return self._account_number
+        except Exception as e:
+            logger.error("[RH] get_accounts failed: {}", e)
+            return ""
+
     async def get_portfolio(self) -> dict:
         if not self._available():
             return {}
         try:
-            result = await self._call_tool("get_portfolio", {})
-            return result
+            acct = await self.get_account_number()
+            args = {"account_number": acct} if acct else {}
+            return await self._call_tool("get_portfolio", args)
         except Exception as e:
             logger.error("[RH] get_portfolio failed: {}", e)
             return {}
+
+    async def get_positions(self) -> list[dict]:
+        if not self._available():
+            return []
+        try:
+            acct = await self.get_account_number()
+            if not acct:
+                return []
+            result = await self._call_tool("get_equity_positions", {"account_number": acct})
+            return result.get("positions", result) if isinstance(result, dict) else []
+        except Exception as e:
+            logger.error("[RH] get_positions failed: {}", e)
+            return []
 
     async def get_quote(self, symbol: str) -> dict:
         if not self._available():
             return {}
         try:
             result = await self._call_tool("get_equity_quotes", {"symbols": [symbol]})
-            quotes = result.get("quotes", result)
-            if isinstance(quotes, list) and quotes:
-                return quotes[0]
-            return quotes if isinstance(quotes, dict) else {}
+            data = result.get("data", result)
+            results = data.get("results", []) if isinstance(data, dict) else []
+            if results:
+                q = results[0].get("quote", results[0])
+                return q
+            return {}
         except Exception as e:
             logger.error("[RH] get_quote({}) failed: {}", symbol, e)
             return {}
+
+    async def get_quote_price(self, symbol: str) -> float:
+        """Return the current price as a float, 0.0 on failure."""
+        q = await self.get_quote(symbol)
+        for field in ("last_trade_price", "last_non_reg_trade_price", "ask_price"):
+            val = q.get(field)
+            if val:
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    pass
+        return 0.0
 
     async def get_orders(self) -> list[dict]:
         if not self._available():
             return []
         try:
-            result = await self._call_tool("get_equity_orders", {})
+            acct = await self.get_account_number()
+            args = {"account_number": acct} if acct else {}
+            result = await self._call_tool("get_equity_orders", args)
             return result.get("orders", result) if isinstance(result, dict) else []
         except Exception as e:
             logger.error("[RH] get_orders failed: {}", e)
@@ -162,7 +249,9 @@ class RobinhoodBroker:
         if not self._available():
             return {}
         try:
+            acct = await self.get_account_number()
             args: dict[str, Any] = {
+                "account_number": acct,
                 "symbol": symbol,
                 "side": side.lower(),
                 "quantity": qty,
@@ -189,14 +278,15 @@ class RobinhoodBroker:
         if not self._available():
             return None
 
-        # Safety: always review before placing
         review = await self.review_order(symbol, side, qty, order_type, limit_price)
         if not review:
             logger.warning("[RH] Skipping order — review returned empty for {} {}", side, symbol)
             return None
 
         try:
+            acct = await self.get_account_number()
             args: dict[str, Any] = {
+                "account_number": acct,
                 "symbol": symbol,
                 "side": side.lower(),
                 "quantity": qty,
@@ -217,7 +307,11 @@ class RobinhoodBroker:
         if not self._available():
             return False
         try:
-            await self._call_tool("cancel_equity_order", {"order_id": order_id})
+            acct = await self.get_account_number()
+            args: dict[str, Any] = {"order_id": order_id}
+            if acct:
+                args["account_number"] = acct
+            await self._call_tool("cancel_equity_order", args)
             logger.info("[RH] Order cancelled: {}", order_id)
             return True
         except Exception as e:
