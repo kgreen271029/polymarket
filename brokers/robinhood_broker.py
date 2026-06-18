@@ -60,13 +60,17 @@ class RobinhoodBroker:
                 "refresh_token": self._refresh,
                 "client_id":     self._client_id,
             }).encode()
-            req  = urllib.request.Request(
-                TOKEN_URL, data=payload,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            resp = urllib.request.urlopen(req, timeout=10)
-            import json as _json
-            data = _json.loads(resp.read())
+
+            async def _do_refresh() -> dict:
+                req  = urllib.request.Request(
+                    TOKEN_URL, data=payload,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                resp = urllib.request.urlopen(req, timeout=10)
+                import json as _json
+                return _json.loads(resp.read())
+
+            data = await asyncio.to_thread(_do_refresh)
             new_token = data.get("access_token")
             if new_token:
                 self._token   = new_token
