@@ -115,6 +115,24 @@ class ORBStrategy(BaseStrategy):
                     continue
 
                 if symbol not in self._orb_ranges:
+                    # Filter to today's regular session only (9:30 ET+) so pre-market
+                    # bars from yfinance don't corrupt the opening range calculation.
+                    utc_now = datetime.now(tz=timezone.utc)
+                    et_off = 4 if 3 <= utc_now.month <= 11 else 5  # hours ahead of ET
+                    session_start_h = 9 + et_off  # 9:30 ET → 13:30 UTC (EDT) / 14:30 (EST)
+                    session_open_utc = utc_now.replace(
+                        hour=session_start_h, minute=30, second=0, microsecond=0
+                    )
+                    try:
+                        if df5.index.tzinfo is not None:
+                            df5_session = df5[df5.index >= session_open_utc]
+                        else:
+                            df5_session = df5[df5.index >= session_open_utc.replace(tzinfo=None)]
+                        if len(df5_session) >= 3:
+                            df5 = df5_session
+                    except Exception:
+                        pass
+
                     # Compute ORB range from first 15 minutes (3 × 5-min bars)
                     orb_bars = df5.head(3)
                     orb_high = float(orb_bars["high"].max())
