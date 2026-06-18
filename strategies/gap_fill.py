@@ -145,5 +145,30 @@ class GapFillTrader(BaseStrategy):
     async def should_exit(self, position) -> bool:
         return False  # exits handled by SwingTrader's stop/target monitor
 
-    async def run(self) -> None:
-        await self.run_loop(LOOP_INTERVAL)
+    async def run(self, market_just_opened: "asyncio.Event | None" = None) -> None:
+        self._running = True
+        logger.info("[GapFill] Started (interval={}s)", LOOP_INTERVAL)
+        while self._running:
+            try:
+                signals = await self.generate_signals()
+                for sig in signals:
+                    await self._signal_bus.put(sig)
+                    logger.info("[GapFill] → {} {} @ ${:.2f} stop=${:.2f} tgt=${:.2f}",
+                                sig.side.upper(), sig.symbol, sig.entry_price,
+                                sig.stop_price or 0, sig.take_profit or 0)
+            except Exception as exc:
+                logger.error("[GapFill] run error: {}", exc)
+
+            remaining = LOOP_INTERVAL
+            while remaining > 0 and self._running:
+                chunk = min(60, remaining)
+                if market_just_opened is not None:
+                    try:
+                        await asyncio.wait_for(market_just_opened.wait(), timeout=float(chunk))
+                        logger.info("[GapFill] Market-open signal — immediate scan")
+                        break
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(chunk)
+                remaining -= chunk

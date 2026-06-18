@@ -174,9 +174,9 @@ async def main(dry_run: bool = False, eod: bool = False) -> None:
     )
     strategy_coros += [
         news_momentum.run(),
-        swing_trader.run(),
+        swing_trader.run(market_just_opened=engine.market_just_opened),
         alpha_scanner.run(),
-        gap_fill.run(),
+        gap_fill.run(market_just_opened=engine.market_just_opened),
         orb.run(),
         short_scanner.run(),
     ]

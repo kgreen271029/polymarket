@@ -142,15 +142,17 @@ class SwingTrader(BaseStrategy):
                 ):
                     continue
 
-                # VCP filter: volatility must be contracting (ATR ratio < 1.0 = tightening)
+                # VCP filter: compute volatility contraction score and pass to AI.
+                # We don't hard-block on VCP alone — expanding vol still allows
+                # trend/breakout entries; the AI will reduce confidence accordingly.
                 vcp_score = 0.3
                 if len(df) >= 55:
                     try:
                         vcp_score = volatility_contraction(df)
                     except Exception:
                         pass
-                if vcp_score < 0.5:
-                    logger.debug("[SwingTrader] {} VCP weak ({:.2f}) — skip", symbol, vcp_score)
+                if vcp_score < 0.3:
+                    logger.debug("[SwingTrader] {} VCP very weak ({:.2f}) — skip", symbol, vcp_score)
                     continue
 
                 # ATR-based stop and Kelly sizing (use 2.2x ATR — research optimal vs 2.0)
@@ -281,7 +283,7 @@ class SwingTrader(BaseStrategy):
             except Exception as e:
                 logger.error("[SwingTrader] Exit check error {}: {}", sym, e)
 
-    async def run(self) -> None:
+    async def run(self, market_just_opened: "asyncio.Event | None" = None) -> None:
         self._running = True
         logger.info("[SwingTrader] Started (interval={}s)", LOOP_INTERVAL)
         while self._running:
@@ -294,4 +296,18 @@ class SwingTrader(BaseStrategy):
                                 sig.side.upper(), sig.symbol, sig.entry_price, sig.qty)
             except Exception as exc:
                 logger.error("[SwingTrader] run error: {}", exc)
-            await asyncio.sleep(LOOP_INTERVAL)
+
+            # Sleep in 60s chunks so we wake up quickly when market opens
+            remaining = LOOP_INTERVAL
+            while remaining > 0 and self._running:
+                chunk = min(60, remaining)
+                if market_just_opened is not None:
+                    try:
+                        await asyncio.wait_for(market_just_opened.wait(), timeout=float(chunk))
+                        logger.info("[SwingTrader] Market-open signal — immediate scan")
+                        break  # re-scan immediately
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(chunk)
+                remaining -= chunk

@@ -58,6 +58,7 @@ class TradingEngine:
         self.fill_queue: asyncio.Queue[FillEvent] = asyncio.Queue()
 
         self.market_open: bool = False
+        self.market_just_opened: asyncio.Event = asyncio.Event()  # pulsed each time market opens
         self._tasks: list[asyncio.Task[Any]] = []
         self._shutdown_event = asyncio.Event()
         # symbol -> (stop, target, strategy) captured at order time, applied on fill
@@ -78,6 +79,7 @@ class TradingEngine:
             self._process_fills(),
             self._market_open_gate(),
             self._daily_reset(),
+            self._watchdog(),
         ]
         all_coros = list(core_coros) + list(extra_tasks)
 
@@ -303,6 +305,7 @@ class TradingEngine:
             logger.warning("[ENGINE] zoneinfo timezone unavailable — using UTC-offset fallback for market hours")
 
         logger.info("Market gate started")
+        _was_open = False
         while not self._shutdown_event.is_set():
             try:
                 if self._alpaca_broker is not None:
@@ -316,6 +319,14 @@ class TradingEngine:
                 else:
                     self.market_open = _utc_offset_market_open()
                 logger.debug("Market status: {}", "OPEN" if self.market_open else "CLOSED")
+
+                # Pulse market_just_opened event so strategies can wake up instantly
+                if self.market_open and not _was_open:
+                    logger.info("[ENGINE] Market OPENED — pulsing strategies for immediate scan")
+                    self.market_just_opened.set()
+                    await asyncio.sleep(0)          # yield so waiters can run
+                    self.market_just_opened.clear()  # reset for next day
+                _was_open = self.market_open
             except Exception as exc:
                 logger.warning("[ENGINE] Could not fetch market clock: {} — using time fallback", exc)
                 self.market_open = _utc_offset_market_open()
@@ -357,6 +368,28 @@ class TradingEngine:
                 retention="30 days",
                 level="DEBUG",
             )
+
+    # ------------------------------------------------------------------
+    # Watchdog — detects stalled tasks and logs heartbeat
+    # ------------------------------------------------------------------
+
+    async def _watchdog(self) -> None:
+        """Log a heartbeat every 5 minutes; detect and cancel dead tasks."""
+        logger.info("Watchdog started")
+        while not self._shutdown_event.is_set():
+            await asyncio.sleep(300)
+            alive = [t for t in self._tasks if not t.done()]
+            dead  = [t for t in self._tasks if t.done() and not t.cancelled()]
+            logger.info(
+                "[WATCHDOG] Heartbeat — tasks alive={} done={} | market={} | pnl={:+.2f}",
+                len(alive), len(dead),
+                "OPEN" if self.market_open else "closed",
+                self._portfolio.total_pnl,
+            )
+            for t in dead:
+                exc = t.exception()
+                if exc:
+                    logger.error("[WATCHDOG] Task {} died with exception: {}", t.get_name(), exc)
 
     # ------------------------------------------------------------------
     # Shutdown
