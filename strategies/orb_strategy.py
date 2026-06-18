@@ -210,11 +210,43 @@ class ORBStrategy(BaseStrategy):
         except Exception:
             return False
 
+    async def _check_exits(self) -> None:
+        """Monitor open ORB positions for stop/target/EOD exit."""
+        if not self._market_open():
+            return
+        for key, pos in list(self._portfolio.positions.items()):
+            if pos.strategy_name != self.name:
+                continue
+            sym = pos.symbol
+            try:
+                price = await self._rh.get_quote_price(sym)
+                if not price:
+                    continue
+                price = float(price)
+                reason = None
+                if pos.stop_loss and price <= pos.stop_loss:
+                    reason = f"ORB stop hit @ ${price:.2f} (stop=${pos.stop_loss:.2f})"
+                elif pos.take_profit and price >= pos.take_profit:
+                    reason = f"ORB target hit @ ${price:.2f}"
+                elif await self.should_exit(pos):
+                    reason = f"ORB exit (time/reversal) @ ${price:.2f}"
+                if reason:
+                    logger.info("[ORB] EXIT {} — {}", sym, reason)
+                    await self._signal_bus.put(TradeSignal(
+                        symbol=sym, side="sell", asset_class="stock",
+                        strategy_name=self.name, entry_price=price,
+                        stop_price=None, take_profit=None,
+                        confidence="High", reasoning=reason, qty=pos.qty,
+                    ))
+            except Exception as e:
+                logger.error("[ORB] exit check {}: {}", sym, e)
+
     async def run(self) -> None:
         self._running = True
         logger.info("[ORB] Started — 15-min opening range breakout strategy")
         while self._running:
             try:
+                await self._check_exits()
                 signals = await self.generate_signals()
                 for sig in signals:
                     await self._signal_bus.put(sig)

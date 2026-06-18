@@ -67,6 +67,19 @@ class Config:
     telegram_bot_token: str = field(default_factory=lambda: _require("TELEGRAM_BOT_TOKEN"))
     telegram_chat_id: str = field(default_factory=lambda: _require("TELEGRAM_CHAT_ID"))
 
+    # Uppercase aliases expected by RiskManager and tests
+    @property
+    def MAX_RISK_PER_TRADE(self) -> float:
+        return self.max_risk_per_trade
+
+    @property
+    def DAILY_LOSS_LIMIT_PCT(self) -> float:
+        return self.daily_loss_limit_pct
+
+    @property
+    def MAX_OPEN_POSITIONS(self) -> int:
+        return self.max_open_positions
+
     def validate(self) -> list[str]:
         """Return list of missing critical keys."""
         missing = []
