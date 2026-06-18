@@ -494,6 +494,29 @@ class SocialFeed:
         """Return the most recently fetched CoinGecko trending coins list."""
         return list(self._trending_coins)
 
+    def get_recent_signals(self, min_velocity: float = 2.0) -> list["SocialSignal"]:
+        """Return SocialSignal objects for symbols with recent velocity above threshold."""
+        now_ts = time.time()
+        signals = []
+        for symbol, history in list(self._mention_history.items()):
+            if not history:
+                continue
+            self._prune_history(symbol, now_ts)
+            if not history:
+                continue
+            latest_count = history[-1][1]
+            velocity = self._calculate_velocity(symbol, latest_count)
+            if velocity >= min_velocity:
+                signals.append(SocialSignal(
+                    symbol=symbol,
+                    mention_count=latest_count,
+                    velocity_ratio=velocity,
+                    avg_sentiment=0.0,
+                    top_post_title="",
+                    platform="reddit",
+                ))
+        return signals
+
     def get_symbol_velocity(self, symbol: str) -> float:
         """
         Return the current velocity ratio for a symbol.
