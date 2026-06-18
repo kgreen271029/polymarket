@@ -106,6 +106,9 @@ async def main(dry_run: bool = False, eod: bool = False) -> None:
     )
     engine._robinhood_broker = robinhood
 
+    # Sync real cash + existing positions from Robinhood on startup
+    await portfolio.sync_from_robinhood(robinhood)
+
     if cfg.has_alpaca():
         from brokers.alpaca_broker import AlpacaBroker
         from data.market_data import MarketDataFeed

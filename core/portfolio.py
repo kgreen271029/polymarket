@@ -182,6 +182,41 @@ class PortfolioTracker:
     def get_open_position(self, symbol: str) -> Position | None:
         return self.positions.get(f"{symbol}:long") or self.positions.get(f"{symbol}:short")
 
+    async def sync_from_robinhood(self, rh_broker) -> None:
+        """Seed portfolio state from live Robinhood account on startup."""
+        try:
+            port = await rh_broker.get_portfolio()
+            cash = float(port.get("data", {}).get("buying_power", {}).get("buying_power", 0) or 0)
+            self.cash = cash
+            logger.info("[Portfolio] Synced cash from Robinhood: ${:.2f}", cash)
+
+            pos_data = await rh_broker.get_positions()
+            positions_list = pos_data.get("data", {}).get("positions", [])
+            now = datetime.now(tz=timezone.utc)
+            for p in positions_list:
+                sym = p.get("symbol", "")
+                qty = float(p.get("quantity", 0))
+                avg = float(p.get("average_buy_price") or 0)
+                if not sym or qty <= 0:
+                    continue
+                key = f"{sym}:long"
+                self.positions[key] = Position(
+                    symbol=sym,
+                    side="long",
+                    qty=qty,
+                    entry_price=avg,
+                    current_price=avg,
+                    stop_loss=None,
+                    take_profit=None,
+                    asset_class="stock",
+                    strategy_name="pre-existing",
+                    opened_at=now,
+                    order_id="",
+                )
+                logger.info("[Portfolio] Loaded existing position: {} x{:.4f} @ ${:.2f}", sym, qty, avg)
+        except Exception as e:
+            logger.error("[Portfolio] sync_from_robinhood failed: {}", e)
+
     # ------------------------------------------------------------------
     # Display
     # ------------------------------------------------------------------
