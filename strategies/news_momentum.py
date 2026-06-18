@@ -78,7 +78,15 @@ class NewsMomentum(BaseStrategy):
                 quote = await self._rh.get_quote(symbol)
                 if not quote:
                     continue
-                price = float(quote.get("last_price") or quote.get("ask") or 0)
+                price = 0.0
+                for field in ("last_trade_price", "last_non_reg_trade_price", "ask_price"):
+                    val = quote.get(field)
+                    if val:
+                        try:
+                            price = float(val)
+                            break
+                        except (TypeError, ValueError):
+                            pass
                 if price <= 0:
                     continue
 
@@ -102,6 +110,12 @@ class NewsMomentum(BaseStrategy):
                 stop = decision.stop_price or round(price * 0.96, 2)
                 target = decision.take_profit or round(price * 1.08, 2)
 
+                cash = self._portfolio.get_available_capital()
+                max_dollars = min(cash * 0.20, 20.0)
+                qty = round(max_dollars / price, 6) if price > 0 else 0
+                if qty <= 0:
+                    continue
+
                 force_swing = self._portfolio.get_day_trade_count() >= 3
                 signal = TradeSignal(
                     symbol=symbol,
@@ -113,6 +127,7 @@ class NewsMomentum(BaseStrategy):
                     take_profit=target,
                     confidence=decision.confidence,
                     reasoning=f"{event.title[:80]} | {decision.reasoning}",
+                    qty=qty,
                     metadata={"force_swing": force_swing, "news_url": event.raw_url},
                 )
                 await self._signal_bus.put(signal)

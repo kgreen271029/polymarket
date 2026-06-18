@@ -110,6 +110,11 @@ class CryptoMomentum(BaseStrategy):
                 if decision.recommendation == "BUY":
                     stop = decision.stop_price or round(price * (1 - STOP_PCT), 6)
                     target = decision.take_profit or round(price * (1 + TARGET_PCT), 6)
+                    cash = self._portfolio.get_available_capital()
+                    max_dollars = min(cash * 0.15, 20.0)
+                    qty = round(max_dollars / price, 6) if price > 0 else 0
+                    if qty <= 0:
+                        continue
                     signals.append(TradeSignal(
                         symbol=symbol,
                         side="buy",
@@ -120,6 +125,7 @@ class CryptoMomentum(BaseStrategy):
                         take_profit=target,
                         confidence=decision.confidence,
                         reasoning=decision.reasoning,
+                        qty=qty,
                     ))
             except Exception as e:
                 logger.error("[CryptoMomentum] Error on {}: {}", symbol, e)

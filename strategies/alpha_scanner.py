@@ -134,6 +134,11 @@ class AlphaScanner(BaseStrategy):
                 if decision.recommendation == "BUY" and decision.confidence in ("Medium", "High"):
                     stop = decision.stop_price or round(price * 0.96, 4)
                     target = decision.take_profit or round(price * 1.08, 4)
+                    cash = self._portfolio.get_available_capital()
+                    max_dollars = min(cash * 0.15, 20.0)
+                    qty = round(max_dollars / price, 6) if price > 0 else 0
+                    if qty <= 0:
+                        continue
                     signals.append(TradeSignal(
                         symbol=symbol,
                         side="buy",
@@ -144,6 +149,7 @@ class AlphaScanner(BaseStrategy):
                         take_profit=target,
                         confidence=decision.confidence,
                         reasoning=f"Alpha score={score} | {decision.reasoning}",
+                        qty=qty,
                     ))
             except Exception as e:
                 logger.error("[AlphaScanner] AI analysis failed for {}: {}", symbol, e)

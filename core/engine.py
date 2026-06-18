@@ -14,27 +14,8 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# Shared event types (imported by brokers, strategies, and data feeds)
+# Engine-level event types
 # ---------------------------------------------------------------------------
-
-@dataclass
-class TradeSignal:
-    symbol: str
-    side: str           # "buy" or "sell"
-    qty: float
-    entry_price: float
-    asset_class: str    # "crypto" | "stock" | "polymarket"
-    strategy_name: str
-    confidence: str     # "low" | "medium" | "high"
-    stop_price: float | None = None
-    take_profit: float | None = None
-    order_id: str | None = None
-    timestamp: datetime = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        if self.timestamp is None:
-            self.timestamp = datetime.now(tz=timezone.utc)
-
 
 @dataclass
 class FillEvent:
@@ -44,26 +25,6 @@ class FillEvent:
     qty: float
     fill_price: float
     asset_class: str
-    timestamp: datetime
-
-
-@dataclass
-class HeadlineEvent:
-    headline: str
-    source: str
-    sentiment: float    # -1.0 to +1.0
-    symbols: list[str]
-    timestamp: datetime
-    urgency: str = "normal"  # "normal" | "breaking"
-
-
-@dataclass
-class SocialSignal:
-    platform: str
-    content: str
-    sentiment: float
-    symbols: list[str]
-    engagement_score: float
     timestamp: datetime
 
 
@@ -90,10 +51,10 @@ class TradingEngine:
         self._config = config
         self._notifier = notifier
 
-        self.signal_bus: asyncio.Queue[TradeSignal] = asyncio.Queue()
-        self.news_queue: asyncio.Queue[HeadlineEvent] = asyncio.Queue()
-        self.social_queue: asyncio.Queue[SocialSignal] = asyncio.Queue()
-        self.breaking_queue: asyncio.Queue[HeadlineEvent] = asyncio.Queue()
+        self.signal_bus: asyncio.Queue = asyncio.Queue()
+        self.news_queue: asyncio.Queue = asyncio.Queue()
+        self.social_queue: asyncio.Queue = asyncio.Queue()
+        self.breaking_queue: asyncio.Queue = asyncio.Queue()
         self.fill_queue: asyncio.Queue[FillEvent] = asyncio.Queue()
 
         self.market_open: bool = False

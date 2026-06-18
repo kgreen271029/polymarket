@@ -190,7 +190,7 @@ async def main(dry_run: bool = False, eod: bool = False) -> None:
         new_coins        = NewCoinsScanner(social_feed)
         crypto_scalper   = CryptoScalper(engine.signal_bus, market_data, portfolio, market_open_fn)
         crypto_momentum  = CryptoMomentum(engine.signal_bus, market_data, ai, engine.news_queue, portfolio, market_open_fn)
-        new_coin_hunter  = NewCoinHunter(engine.signal_bus, new_coins, social_feed, ai, portfolio, market_open_fn)
+        new_coin_hunter  = NewCoinHunter(engine.signal_bus, new_coins, social_feed, ai, portfolio, market_open_fn, market_data)
         strategy_coros  += [crypto_scalper.run(), crypto_momentum.run(), new_coin_hunter.run(), new_coins.poll_loop()]
 
     if cfg.has_polymarket():

@@ -68,6 +68,11 @@ class CryptoScalper(BaseStrategy):
                 ):
                     stop = round(price * (1 - STOP_PCT), 6)
                     target = round(price * (1 + TARGET_PCT), 6)
+                    cash = self._portfolio.get_available_capital()
+                    max_dollars = min(15.0, cash * 0.15)  # $15 per scalp
+                    qty = round(max_dollars / price, 6) if price > 0 else 0
+                    if qty <= 0:
+                        continue
                     signals.append(TradeSignal(
                         symbol=symbol,
                         side="buy",
@@ -78,6 +83,7 @@ class CryptoScalper(BaseStrategy):
                         take_profit=target,
                         confidence="Medium",
                         reasoning=f"RSI={rsi:.1f} oversold, MACD turning up, vol spike, BB lower",
+                        qty=qty,
                     ))
             except Exception as e:
                 logger.error("[CryptoScalper] Error scanning {}: {}", symbol, e)

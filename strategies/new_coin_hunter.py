@@ -31,12 +31,14 @@ class NewCoinHunter(BaseStrategy):
         ai_analyzer,
         portfolio_tracker,
         market_open_fn: Callable[[], bool],
+        market_data=None,
     ) -> None:
         super().__init__(signal_bus, market_open_fn)
         self._scanner = new_coins_scanner
         self._social = social_feed
         self._ai = ai_analyzer
         self._portfolio = portfolio_tracker
+        self._market_data = market_data
         self._max_price_seen: dict[str, float] = {}
 
     async def generate_signals(self) -> list[TradeSignal]:
@@ -92,17 +94,35 @@ class NewCoinHunter(BaseStrategy):
                     logger.info("[NewCoinHunter] {} scored {}/10 — skipping", sym, score)
                     continue
 
-                # We don't have a live price yet; signal qty=0 for risk manager to size
+                # Fetch current price — required by risk manager
+                price = 0.0
+                if self._market_data is not None:
+                    try:
+                        df = await self._market_data.get_bars(alpaca_symbol, "1Min", limit=5)
+                        if df is not None and len(df) > 0:
+                            price = float(df["close"].iloc[-1])
+                    except Exception:
+                        pass
+                if price <= 0:
+                    logger.debug("[NewCoinHunter] No price for {} — skipping", alpaca_symbol)
+                    continue
+
+                stop = round(price * (1 - TRAILING_STOP_PCT), 6)
+                qty = round(MAX_COIN_POSITION / price, 6)
+                if qty <= 0:
+                    continue
+
                 signals.append(TradeSignal(
                     symbol=alpaca_symbol,
                     side="buy",
                     asset_class="crypto",
                     strategy_name=self.name,
-                    entry_price=0.0,  # market order; engine will fetch current price
-                    stop_price=None,  # trailing stop managed by should_exit
+                    entry_price=price,
+                    stop_price=stop,
                     take_profit=None,
                     confidence="Medium" if score >= 8 else "Low",
                     reasoning=decision.get("reasoning", f"New coin score {score}/10"),
+                    qty=qty,
                     metadata={
                         "is_new_coin": True,
                         "ai_score": score,

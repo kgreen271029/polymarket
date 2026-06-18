@@ -8,7 +8,7 @@ from loguru import logger
 from core.portfolio import PortfolioTracker
 
 if TYPE_CHECKING:
-    from core.engine import TradeSignal
+    from strategies.base_strategy import TradeSignal
 
 
 _CONFIDENCE_SCALAR: dict[str, float] = {
