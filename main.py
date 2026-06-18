@@ -177,7 +177,7 @@ async def main(dry_run: bool = False, eod: bool = False) -> None:
         swing_trader.run(market_just_opened=engine.market_just_opened),
         alpha_scanner.run(),
         gap_fill.run(market_just_opened=engine.market_just_opened),
-        orb.run(),
+        orb.run(market_just_opened=engine.market_just_opened),
         short_scanner.run(),
     ]
 

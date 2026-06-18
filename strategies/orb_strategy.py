@@ -259,7 +259,7 @@ class ORBStrategy(BaseStrategy):
             except Exception as e:
                 logger.error("[ORB] exit check {}: {}", sym, e)
 
-    async def run(self) -> None:
+    async def run(self, market_just_opened: "asyncio.Event | None" = None) -> None:
         self._running = True
         logger.info("[ORB] Started — 15-min opening range breakout strategy")
         while self._running:
@@ -273,4 +273,16 @@ class ORBStrategy(BaseStrategy):
                                 sig.stop_price or 0, sig.take_profit or 0)
             except Exception as exc:
                 logger.error("[ORB] run error: {}", exc)
-            await asyncio.sleep(LOOP_INTERVAL)
+            remaining = LOOP_INTERVAL
+            while remaining > 0 and self._running:
+                chunk = min(30, remaining)
+                if market_just_opened is not None:
+                    try:
+                        await asyncio.wait_for(market_just_opened.wait(), timeout=float(chunk))
+                        logger.info("[ORB] Market-open signal — immediate scan")
+                        break
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(chunk)
+                remaining -= chunk
