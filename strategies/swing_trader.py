@@ -9,13 +9,23 @@ from loguru import logger
 
 from strategies.base_strategy import BaseStrategy, TradeSignal
 from analysis.technical import TechnicalAnalyzer
+from analysis.filters import (
+    earnings_blackout,
+    sector_momentum_ok,
+    volatility_regime_ok,
+    kelly_position_size,
+    atr_trailing_stop,
+    bearish_divergence,
+    top_sectors,
+    symbol_in_top_sectors,
+)
 
 WATCHLIST = [
     "AAPL", "MSFT", "NVDA", "TSLA", "SPY", "QQQ",
     "AMZN", "META", "GOOGL", "AMD", "COIN", "MSTR",
+    "ARM", "JPM", "GS", "PLTR",
 ]
 LOOP_INTERVAL = 900
-MIN_HOLD_DAYS = 2
 
 
 class SwingTrader(BaseStrategy):
@@ -33,21 +43,58 @@ class SwingTrader(BaseStrategy):
         self._rh = robinhood_broker
         self._ai = ai_analyzer
         self._portfolio = portfolio_tracker
+        self._top_sectors: list[str] = []
+        self._sector_refresh_count = 0
 
     async def generate_signals(self) -> list[TradeSignal]:
         if not self._market_open():
             return []
 
+        cash = self._portfolio.get_available_capital()
+        if cash < 5.0:
+            return []   # not enough cash to open anything
+
+        # Refresh top sectors every 4 loops (~1 hour)
+        self._sector_refresh_count += 1
+        if self._sector_refresh_count % 4 == 1:
+            self._top_sectors = await asyncio.to_thread(top_sectors, 3)
+            logger.info("[SwingTrader] Top sectors: {}", self._top_sectors)
+
+        # Volatility regime check (skip choppy days)
+        regime_ok, regime_reason = await asyncio.to_thread(volatility_regime_ok)
+        if not regime_ok:
+            logger.info("[SwingTrader] Skipping — {}", regime_reason)
+            return []
+
         signals: list[TradeSignal] = []
-        open_stocks = sum(1 for p in self._portfolio.positions.values() if p.asset_class == "stock")
+        open_syms = {p.split(":")[0] for p in self._portfolio.positions}
+        open_stocks = sum(1 for p in self._portfolio.positions.values()
+                         if getattr(p, "asset_class", "") == "stock")
         if open_stocks >= 2:
             return signals
 
         for symbol in WATCHLIST:
-            if symbol in {p.split(":")[0] for p in self._portfolio.positions}:
+            if symbol in open_syms:
                 continue
             try:
-                df = await self._market_data.get_bars(symbol, "1Day", limit=55)
+                # — Sector momentum filter —
+                sec_ok, sec_reason = await asyncio.to_thread(sector_momentum_ok, symbol)
+                if not sec_ok:
+                    logger.debug("[SwingTrader] {} skipped: {}", symbol, sec_reason)
+                    continue
+
+                # — Sector rotation: prefer top-performing sectors —
+                if self._top_sectors and not symbol_in_top_sectors(symbol, self._top_sectors):
+                    logger.debug("[SwingTrader] {} not in top sectors", symbol)
+                    continue
+
+                # — Earnings blackout —
+                blocked, earn_reason = await asyncio.to_thread(earnings_blackout, symbol)
+                if blocked:
+                    logger.info("[SwingTrader] {} blocked: {}", symbol, earn_reason)
+                    continue
+
+                df = await self._market_data.get_bars(symbol, "1Day", limit=60)
                 if df is None or len(df) < 30:
                     continue
 
@@ -55,89 +102,116 @@ class SwingTrader(BaseStrategy):
                 if not s:
                     continue
 
-                price = s.get("latest_close", 0)
-                rsi = s.get("rsi", 50)
-                sma20 = s.get("sma_20", 0)
+                price      = s.get("latest_close", 0)
+                rsi        = s.get("rsi", 50)
+                sma20      = s.get("sma_20", 0)
+                sma50      = s.get("sma_50", price)
                 volume_ratio = s.get("volume_ratio", 1.0)
                 pct_vs_sma = s.get("price_vs_sma20_pct", 0)
+                atr        = s.get("atr", price * 0.02)
 
-                if (
+                if not (
                     price > 0
-                    and sma20 > 0
-                    and 0 < pct_vs_sma < 3.0   # just reclaimed SMA from below
-                    and 38 <= rsi <= 60
-                    and volume_ratio > 1.2
+                    and price > sma50                  # above 50-day trend
+                    and 0 < pct_vs_sma < 4.0           # just above 20-SMA
+                    and 38 <= rsi <= 65                 # RSI sweet spot
+                    and volume_ratio > 1.3              # volume conviction
                 ):
-                    # Stop at recent 5-day low
-                    recent_low = float(df["low"].tail(5).min())
-                    stop = round(recent_low * 0.995, 2)
-                    risk = price - stop
-                    target = round(price + risk * 2.0, 2)
+                    continue
 
-                    from analysis.ai_analyzer import AnalysisContext
-                    context = AnalysisContext(
+                # ATR-based stop and Kelly sizing
+                stop   = round(price - 2.0 * atr, 2)
+                target = round(price + 3.0 * atr, 2)
+                dollar_size = kelly_position_size(
+                    account_cash=cash,
+                    entry_price=price,
+                    stop_price=stop,
+                    win_rate=0.50,
+                    avg_win_loss_ratio=1.5,
+                    max_pct=0.30,
+                )
+                qty = round(dollar_size / price, 6) if price > 0 else 0
+                if qty <= 0:
+                    continue
+
+                from analysis.ai_analyzer import AnalysisContext
+                context = AnalysisContext(
+                    symbol=symbol,
+                    asset_class="stock",
+                    strategy_name=self.name,
+                    proposed_action="BUY",
+                    signal_summary={**s, "sector_ok": sec_reason, "regime": regime_reason},
+                    news_headlines=[],
+                    available_capital=cash,
+                    open_position_count=len(self._portfolio.positions),
+                    daily_pnl_pct=self._portfolio.daily_pnl,
+                )
+                decision = await self._ai.analyze(context)
+
+                if decision.recommendation == "BUY":
+                    signals.append(TradeSignal(
                         symbol=symbol,
+                        side="buy",
                         asset_class="stock",
                         strategy_name=self.name,
-                        proposed_action="BUY",
-                        signal_summary=s,
-                        news_headlines=[],
-                        available_capital=self._portfolio.get_available_capital(),
-                        open_position_count=len(self._portfolio.positions),
-                        daily_pnl_pct=self._portfolio.daily_pnl,
-                    )
-                    decision = await self._ai.analyze(context)
+                        entry_price=price,
+                        stop_price=decision.stop_price or stop,
+                        take_profit=decision.take_profit or target,
+                        confidence=decision.confidence,
+                        reasoning=decision.reasoning,
+                        qty=qty,
+                    ))
 
-                    if decision.recommendation == "BUY":
-                        signals.append(TradeSignal(
-                            symbol=symbol,
-                            side="buy",
-                            asset_class="stock",
-                            strategy_name=self.name,
-                            entry_price=price,
-                            stop_price=decision.stop_price or stop,
-                            take_profit=decision.take_profit or target,
-                            confidence=decision.confidence,
-                            reasoning=decision.reasoning,
-                            metadata={"min_hold_days": MIN_HOLD_DAYS},
-                        ))
             except Exception as e:
                 logger.error("[SwingTrader] Error on {}: {}", symbol, e)
 
         return signals
 
-    async def should_exit(self, position: object) -> bool:
+    async def should_exit(self, position) -> bool:
         try:
-            df = await self._market_data.get_bars(position.symbol, "1Day", limit=25)  # type: ignore[attr-defined]
+            df = await self._market_data.get_bars(position.symbol, "1Day", limit=30)
             if df is None or len(df) < 20:
                 return False
             s = TechnicalAnalyzer.build_signal_summary(df)
             rsi = s.get("rsi", 50)
             pct_vs_sma = s.get("price_vs_sma20_pct", 0)
-            return rsi > 72 or pct_vs_sma < -2.0
+            # Bearish divergence check
+            import pandas as pd
+            rsi_series   = pd.Series(s.get("rsi_series", [rsi]))
+            price_series = df["close"] if "close" in df.columns else pd.Series([position.entry_price])
+            div = bearish_divergence(price_series, rsi_series)
+            return rsi > 72 or pct_vs_sma < -2.5 or div
         except Exception:
             return False
 
     async def _check_exits(self) -> None:
-        """Check open positions against stop/target and fire sell signals."""
+        """Monitor open positions against stop/target/trailing stop."""
         if not self._market_open():
             return
-        for sym, pos in list(self._portfolio.positions.items()):
+        for key, pos in list(self._portfolio.positions.items()):
             if getattr(pos, "asset_class", "") != "stock":
                 continue
+            sym = pos.symbol
             try:
-                quote = await self._rh.get_quote_price(sym)
-                if quote is None:
+                price = await self._rh.get_quote_price(sym)
+                if price is None:
                     continue
-                price = float(quote)
-                stop   = getattr(pos, "stop_loss",   None)
-                target = getattr(pos, "take_profit",  None)
-                qty    = getattr(pos, "qty",          0)
+                price = float(price)
+
+                # Update trailing stop
+                high_since = max(price, getattr(pos, "_highest_price", pos.entry_price))
+                pos._highest_price = high_since  # type: ignore[attr-defined]
+                atr = (pos.entry_price * 0.02)   # rough 2% ATR if not stored
+                trail_stop = atr_trailing_stop(pos.entry_price, atr, high_since)
+                effective_stop = max(pos.stop_loss or 0, trail_stop)
 
                 reason = None
-                if stop   and price <= stop:   reason = f"stop hit @ {price:.2f}"
-                elif target and price >= target: reason = f"target hit @ {price:.2f}"
-                elif await self.should_exit(pos): reason = f"technical exit @ {price:.2f}"
+                if price <= effective_stop:
+                    reason = f"stop/trail hit @ ${price:.2f} (stop=${effective_stop:.2f})"
+                elif pos.take_profit and price >= pos.take_profit:
+                    reason = f"target hit @ ${price:.2f}"
+                elif await self.should_exit(pos):
+                    reason = f"technical exit @ ${price:.2f}"
 
                 if reason:
                     logger.info("[SwingTrader] EXIT {} — {}", sym, reason)
@@ -151,7 +225,7 @@ class SwingTrader(BaseStrategy):
                         take_profit=None,
                         confidence="High",
                         reasoning=reason,
-                        qty=qty,
+                        qty=pos.qty,
                     ))
             except Exception as e:
                 logger.error("[SwingTrader] Exit check error {}: {}", sym, e)
@@ -165,7 +239,8 @@ class SwingTrader(BaseStrategy):
                 signals = await self.generate_signals()
                 for sig in signals:
                     await self._signal_bus.put(sig)
-                    logger.info("[SwingTrader] → {} {} @ {:.2f}", sig.side.upper(), sig.symbol, sig.entry_price)
+                    logger.info("[SwingTrader] → {} {} @ ${:.2f} qty={:.4f}",
+                                sig.side.upper(), sig.symbol, sig.entry_price, sig.qty)
             except Exception as exc:
                 logger.error("[SwingTrader] run error: {}", exc)
             await asyncio.sleep(LOOP_INTERVAL)

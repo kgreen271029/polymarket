@@ -12,6 +12,14 @@ from loguru import logger
 
 from analysis.technical import TechnicalAnalyzer
 from analysis.ai_analyzer import AIAnalyzer, AnalysisContext
+from analysis.filters import (
+    earnings_blackout,
+    sector_momentum_ok,
+    volatility_regime_ok,
+    top_sectors,
+    symbol_in_top_sectors,
+    kelly_position_size,
+)
 
 WATCHLIST = [
     # Mega-cap tech
@@ -146,10 +154,18 @@ def _score_setup(sig: dict, gap: float, earnings_soon: bool) -> int:
 
 async def run_eod_scan(ai: AIAnalyzer) -> list[dict]:
     """
-    Scan the watchlist, score each stock, send top candidates to Claude for analysis.
+    Scan the watchlist, score each stock, send top candidates to AI for analysis.
     Returns a list of trade idea dicts sorted by AI confidence.
     """
     logger.info("[EOD] Starting end-of-day scan for {} symbols...", len(WATCHLIST))
+
+    # Market-wide filters (run once)
+    regime_ok, regime_reason = volatility_regime_ok()
+    if not regime_ok:
+        logger.info("[EOD] Choppy regime detected ({}), lowering score threshold", regime_reason)
+    hot_sectors = top_sectors(3)
+    logger.info("[EOD] Hot sectors: {}", hot_sectors)
+
     candidates: list[dict] = []
 
     for symbol in WATCHLIST:
@@ -162,14 +178,39 @@ async def run_eod_scan(ai: AIAnalyzer) -> list[dict]:
                 continue
             gap = _gap_pct(df)
             has_earnings = _earnings_soon(symbol)
+
+            # Earnings blackout — mark but don't exclude (user may want to know)
+            earn_blocked, earn_note = earnings_blackout(symbol, window_days=14)
+
+            # Sector momentum filter
+            sec_ok, sec_note = sector_momentum_ok(symbol)
+            in_hot_sector = symbol_in_top_sectors(symbol, hot_sectors)
+
             score = _score_setup(sig, gap, has_earnings)
+
+            # Bonus for hot sector alignment
+            if in_hot_sector:
+                score = min(100, score + 8)
+            # Penalty for trading against sector trend
+            if not sec_ok:
+                score = max(0, score - 15)
+            # Penalty for earnings risk
+            if earn_blocked:
+                score = max(0, score - 20)
+
             candidates.append({
-                "symbol": symbol,
-                "score": score,
-                "sig": sig,
-                "gap_pct": gap,
+                "symbol":        symbol,
+                "score":         score,
+                "sig":           sig,
+                "gap_pct":       gap,
                 "earnings_soon": has_earnings,
-                "price": sig.get("latest_close", 0),
+                "earn_blocked":  earn_blocked,
+                "earn_note":     earn_note,
+                "sec_ok":        sec_ok,
+                "sec_note":      sec_note,
+                "in_hot_sector": in_hot_sector,
+                "price":         sig.get("latest_close", 0),
+                "regime_ok":     regime_ok,
             })
         except Exception as e:
             logger.debug("[EOD] Error scanning {}: {}", symbol, e)
@@ -220,6 +261,16 @@ async def run_eod_scan(ai: AIAnalyzer) -> list[dict]:
     return ideas
 
 
+def _kelly_note(idea: dict, cash: float = 92.0) -> str:
+    price  = idea.get("price", 0)
+    stop   = idea.get("stop")
+    if not price or not stop or stop >= price:
+        return ""
+    size = kelly_position_size(cash, price, stop, win_rate=0.50, avg_win_loss_ratio=1.5, max_pct=0.30)
+    shares = size / price if price else 0
+    return f"  Kelly size: ${size:.2f} ({shares:.3f} shares)"
+
+
 def format_ideas_report(ideas: list[dict]) -> str:
     """Format the trade ideas list as a human-readable report."""
     if not ideas:
@@ -232,10 +283,13 @@ def format_ideas_report(ideas: list[dict]) -> str:
         earn_str = "  ⚠️ Earnings soon" if idea["earnings_soon"] else ""
         stop_str = f"${idea['stop']:.2f}" if idea.get("stop") else "TBD"
         tgt_str  = f"${idea['target']:.2f}" if idea.get("target") else "TBD"
+        kelly_str = _kelly_note(idea)
+        sec_str   = f"  Sector: {idea.get('sec_note','')}" if not idea.get("sec_ok") else ""
         lines.append(
             f"{i}. {conf_emoji} {idea['symbol']} — {idea['recommendation']} @ ${idea['price']:.2f}"
             f"\n   Confidence: {idea['confidence']} | Score: {idea['score']}/100 | RSI: {idea['rsi']:.0f} | Trend: {idea['trend']}"
-            f"\n   Stop: {stop_str}  Target: {tgt_str}{gap_str}{earn_str}"
+            f"\n   Stop: {stop_str}  Target: {tgt_str}{gap_str}{earn_str}{sec_str}"
+            f"\n{kelly_str}"
             f"\n   {idea['reasoning'][:180]}\n"
         )
     return "\n".join(lines)
