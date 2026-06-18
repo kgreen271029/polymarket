@@ -136,9 +136,9 @@ class SwingTrader(BaseStrategy):
                 if not (
                     price > 0
                     and price > sma50                  # Stage-2: above 50-day trend
-                    and 0 < pct_vs_sma < 3.5           # tightly above 20-SMA (was 4.0)
-                    and 38 <= rsi <= 65                 # RSI sweet spot
-                    and volume_ratio > 1.3              # volume conviction
+                    and -1.0 < pct_vs_sma < 7.0        # allow slight pullback or extension
+                    and 35 <= rsi <= 70                 # expanded RSI sweet spot
+                    and volume_ratio > 1.0              # any above-average volume day
                 ):
                     continue
 

@@ -85,11 +85,18 @@ class ShortScanner(BaseStrategy):
         if cash < 10.0:
             return []
 
-        open_syms = {p.split(":")[0] for p in self._portfolio.positions}
+        # Only send exit signals for stocks we actually hold long.
+        # The engine portfolio tracker has no short-position model; opening net-new
+        # shorts via a "sell" signal would be silently dropped on fill.
+        open_longs = {
+            p.split(":")[0]
+            for p, pos in self._portfolio.positions.items()
+            if getattr(pos, "side", "") == "long" and getattr(pos, "asset_class", "") == "stock"
+        }
 
         for symbol in SHORT_WATCHLIST:
-            if symbol in open_syms:
-                continue
+            if symbol not in open_longs:
+                continue  # only exit longs we already hold
             try:
                 # Earnings blackout — critical for shorts (earnings can gap +20%)
                 blocked, _ = await asyncio.to_thread(earnings_blackout, symbol, window_days=21)

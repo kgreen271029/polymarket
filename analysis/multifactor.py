@@ -35,7 +35,7 @@ def momentum_factor(close: pd.Series) -> float:
     ret_1m = c[-5] / c[-26] - 1 if len(c) > 26 else 0
     ret_3m = c[-5] / c[-68] - 1 if len(c) > 68 else 0
     ret_6m = c[-5] / c[-131] - 1 if len(c) > 131 else 0
-    return ret_1m * 0.15 + ret_3m * 0.35 + ret_6m * 0.20
+    return ret_1m * 0.20 + ret_3m * 0.50 + ret_6m * 0.30
 
 
 def trend_factor(df: pd.DataFrame) -> float:

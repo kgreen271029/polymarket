@@ -157,7 +157,16 @@ class TechnicalAnalyzer:
             vwap_delta_pct = (latest_close - vwap_val) / vwap_val * 100.0 if vwap_val else 0.0
 
             volume_spike = TechnicalAnalyzer.detect_volume_spike(df)
-            latest_vol = float(df["volume"].iloc[-1])
+            # During market hours the last daily bar is incomplete (partial volume).
+            # Use the previous completed bar for the ratio so filters aren't fooled.
+            from datetime import date as _dt_date
+            _last_is_today = (
+                len(df) >= 2
+                and hasattr(df.index[-1], "date")
+                and df.index[-1].date() == _dt_date.today()
+            )
+            _vol_idx = -2 if _last_is_today else -1
+            latest_vol = float(df["volume"].iloc[_vol_idx])
             mean_vol_20 = float(df["volume"].iloc[-21:-1].mean())
             volume_ratio = (latest_vol / mean_vol_20) if mean_vol_20 > 0 else 1.0
 

@@ -154,7 +154,7 @@ def _score_setup(sig: dict, gap: float, earnings_soon: bool) -> int:
     return min(score, 100)
 
 
-async def run_eod_scan(ai: AIAnalyzer) -> list[dict]:
+async def run_eod_scan(ai: AIAnalyzer, available_capital: float = 100.0) -> list[dict]:
     """
     Scan the watchlist, score each stock, send top candidates to AI for analysis.
     Returns a list of trade idea dicts sorted by AI confidence.
@@ -249,7 +249,7 @@ async def run_eod_scan(ai: AIAnalyzer) -> list[dict]:
                 proposed_action="BUY",
                 signal_summary=c["sig"],
                 news_headlines=[],
-                available_capital=92.0,
+                available_capital=available_capital,
                 open_position_count=0,
                 daily_pnl_pct=0.0,
             )
@@ -283,7 +283,7 @@ async def run_eod_scan(ai: AIAnalyzer) -> list[dict]:
     return ideas
 
 
-def _kelly_note(idea: dict, cash: float = 92.0) -> str:
+def _kelly_note(idea: dict, cash: float = 100.0) -> str:
     price  = idea.get("price", 0)
     stop   = idea.get("stop")
     if not price or not stop or stop >= price:

@@ -91,6 +91,7 @@ class PortfolioTracker:
             existing.qty = total_qty
             existing.entry_price = avg_price
             existing.current_price = fill_price
+            self.cash -= qty * fill_price
             logger.info(f"Averaged into {key}: total_qty={total_qty:.4f} avg={avg_price:.4f}")
         else:
             now = datetime.now(tz=timezone.utc)

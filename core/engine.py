@@ -155,7 +155,21 @@ class TradingEngine:
                 )
 
             if signal_obj.asset_class == "crypto" and self._alpaca_broker:
-                await asyncio.to_thread(self._alpaca_broker.submit_order, signal_obj)
+                if signal_obj.side == "buy" and signal_obj.stop_price and signal_obj.take_profit:
+                    await self._alpaca_broker.place_bracket_order(
+                        symbol=signal_obj.symbol,
+                        side=signal_obj.side,
+                        qty=signal_obj.qty,
+                        stop_price=signal_obj.stop_price,
+                        take_profit=signal_obj.take_profit,
+                        strategy_name=signal_obj.strategy_name,
+                    )
+                else:
+                    await self._alpaca_broker.place_market_order(
+                        symbol=signal_obj.symbol,
+                        side=signal_obj.side,
+                        qty=signal_obj.qty,
+                    )
             elif signal_obj.asset_class == "stock" and self._robinhood_broker:
                 # Use limit orders for entries (saves 2-5% annually vs market)
                 # Use market orders for exits where speed is paramount
@@ -272,26 +286,39 @@ class TradingEngine:
     async def _market_open_gate(self) -> None:
         """Updates self.market_open every 60 s. Uses Alpaca clock when available,
         falls back to a simple NYSE time-range check (9:30–16:00 ET, Mon–Fri)."""
-        import zoneinfo
         from datetime import time as dtime
-        ET = zoneinfo.ZoneInfo("America/New_York")
+
+        def _utc_offset_market_open() -> bool:
+            """UTC-offset fallback when zoneinfo is unavailable."""
+            now_utc = datetime.now(tz=timezone.utc)
+            offset_hours = -4 if 3 <= now_utc.month <= 11 else -5
+            et = now_utc + timedelta(hours=offset_hours)
+            return et.weekday() < 5 and dtime(9, 30) <= et.time() < dtime(16, 0)
+
+        try:
+            import zoneinfo
+            ET = zoneinfo.ZoneInfo("America/New_York")
+        except Exception:
+            ET = None
+            logger.warning("[ENGINE] zoneinfo timezone unavailable — using UTC-offset fallback for market hours")
 
         logger.info("Market gate started")
         while not self._shutdown_event.is_set():
             try:
                 if self._alpaca_broker is not None:
-                    clock = await asyncio.to_thread(self._alpaca_broker.get_clock)
-                    self.market_open = bool(clock.is_open)
-                else:
+                    self.market_open = await self._alpaca_broker.is_market_open()
+                elif ET is not None:
                     now = datetime.now(tz=ET)
                     self.market_open = (
                         now.weekday() < 5
                         and dtime(9, 30) <= now.time() < dtime(16, 0)
                     )
+                else:
+                    self.market_open = _utc_offset_market_open()
                 logger.debug("Market status: {}", "OPEN" if self.market_open else "CLOSED")
             except Exception as exc:
-                logger.warning("[ENGINE] Could not fetch market clock: {}", exc)
-                self.market_open = False
+                logger.warning("[ENGINE] Could not fetch market clock: {} — using time fallback", exc)
+                self.market_open = _utc_offset_market_open()
 
             await asyncio.sleep(60)
 
