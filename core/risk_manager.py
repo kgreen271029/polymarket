@@ -180,6 +180,10 @@ class RiskManager:
         return RiskVerdict(approved=True, reason="PDT OK (rule removed Jun 2026)")
 
     def _guard_stop_loss(self, signal: "TradeSignal") -> RiskVerdict:
+        # Polymarket positions resolve at 0 or 1 — max loss is the position size.
+        # No stop_price needed; the risk guard would incorrectly block all poly trades.
+        if signal.asset_class == "polymarket":
+            return RiskVerdict(approved=True, reason="polymarket — max loss = position size")
         if signal.stop_price is None:
             reason = "stop_price is required but was None"
             logger.warning(f"[RISK REJECT] {signal.symbol} — {reason}")

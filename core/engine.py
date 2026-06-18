@@ -177,7 +177,15 @@ class TradingEngine:
                         order_type="market",
                     )
             elif signal_obj.asset_class == "polymarket" and self._polymarket_broker:
-                await asyncio.to_thread(self._polymarket_broker.submit_order, signal_obj)
+                token_id = signal_obj.metadata.get("token_id", "") if hasattr(signal_obj, "metadata") else ""
+                trade_yes = signal_obj.metadata.get("trade_yes", True) if hasattr(signal_obj, "metadata") else True
+                size_usdc = signal_obj.metadata.get("size_usdc", 10.0) if hasattr(signal_obj, "metadata") else 10.0
+                await self._polymarket_broker.place_order(
+                    token_id=token_id,
+                    side="yes" if trade_yes else "no",
+                    price=signal_obj.entry_price,
+                    size_usdc=float(size_usdc),
+                )
             else:
                 logger.error("[ENGINE] No broker available for asset_class '{}' — signal dropped", signal_obj.asset_class)
                 return

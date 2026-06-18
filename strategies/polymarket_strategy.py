@@ -81,22 +81,27 @@ class PolymarketStrategy(BaseStrategy):
                     continue
 
                 trade_yes = ai_prob > yes_price
+                # qty = number of contracts = $10 / price
+                qty = round(MAX_POSITION / yes_price, 4) if yes_price > 0 else 0
+                if qty <= 0:
+                    continue
                 signals.append(TradeSignal(
                     symbol=condition_id[:16],
                     side="buy",
                     asset_class="polymarket",
                     strategy_name=self.name,
                     entry_price=yes_price,
-                    stop_price=None,
+                    stop_price=None,  # Polymarket: max loss = position size (no stop needed)
                     take_profit=1.0,
                     confidence=decision.confidence,
                     reasoning=f"Edge={edge:.2%} on '{question[:60]}' | {decision.reasoning}",
+                    qty=qty,
                     metadata={
                         "token_id": token_id,
                         "condition_id": condition_id,
                         "question": question,
                         "trade_yes": trade_yes,
-                        "max_position_usd": MAX_POSITION,
+                        "size_usdc": MAX_POSITION,
                     },
                 ))
             except Exception as e:
