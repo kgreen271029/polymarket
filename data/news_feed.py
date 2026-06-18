@@ -103,12 +103,16 @@ _CRYPTO_SYMBOLS: set[str] = {v.upper() for v in _CRYPTO_NAMES_AND_SYMBOLS.values
 # ---------------------------------------------------------------------------
 
 _RSS_FEEDS: list[tuple[str, str]] = [
-    ("Reuters Business", "https://feeds.reuters.com/reuters/businessNews"),
-    ("Reuters Tech", "https://feeds.reuters.com/reuters/technologyNews"),
-    ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
-    ("CoinTelegraph", "https://cointelegraph.com/rss"),
-    ("Decrypt", "https://decrypt.co/feed"),
-    ("Benzinga", "https://www.benzinga.com/feed"),
+    # Verified live as of June 2026 — tested with HTTP 200 and real content
+    ("Bloomberg Markets",    "https://feeds.bloomberg.com/markets/news.rss"),
+    ("Bloomberg Technology", "https://feeds.bloomberg.com/technology/news.rss"),
+    ("Benzinga",             "https://www.benzinga.com/feed"),
+    ("Seeking Alpha",        "https://seekingalpha.com/market_currents.xml"),
+    ("CoinDesk",             "https://www.coindesk.com/arc/outboundfeeds/rss"),
+    ("CoinTelegraph",        "https://cointelegraph.com/rss"),
+    ("Decrypt",              "https://decrypt.co/feed"),
+    ("PR Newswire",          "https://www.prnewswire.com/rss/news-releases-list.rss"),
+    # Reuters discontinued open RSS — removed
 ]
 
 # ---------------------------------------------------------------------------
