@@ -68,6 +68,8 @@ class GapFillTrader(BaseStrategy):
                 df = await self._market_data.get_bars(symbol, "1Day", limit=30)
                 if df is None or len(df) < 20:
                     continue
+                if "close" not in df.columns or "open" not in df.columns:
+                    continue
 
                 prev_close = float(df["close"].iloc[-2])
                 today_open = float(df["open"].iloc[-1])

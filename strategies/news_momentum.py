@@ -32,6 +32,8 @@ class NewsMomentum(BaseStrategy):
         self._breaking_queue = breaking_queue
         self._portfolio = portfolio_tracker
         self._scorer = SentimentScorer()
+        # Buffer for breaking news that arrives premarket — replayed at open
+        self._premarket_buffer: list[HeadlineEvent] = []
 
     async def generate_signals(self) -> list[TradeSignal]:
         return []
@@ -41,6 +43,7 @@ class NewsMomentum(BaseStrategy):
 
     async def run_loop(self, _interval: int = 0) -> None:  # type: ignore[override]
         self._running = True
+        _was_open = False
         logger.info("[NewsMomentum] Event-driven loop started")
         while self._running:
             try:
@@ -50,9 +53,24 @@ class NewsMomentum(BaseStrategy):
                     try:
                         event = await asyncio.wait_for(self._news_queue.get(), timeout=10.0)
                     except asyncio.TimeoutError:
+                        # Replay buffered premarket events when market just opened
+                        if self._market_open() and not _was_open and self._premarket_buffer:
+                            logger.info("[NewsMomentum] Market opened — replaying {} buffered events",
+                                        len(self._premarket_buffer))
+                            for buffered in self._premarket_buffer:
+                                await self._process_event(buffered)
+                            self._premarket_buffer.clear()
+                        _was_open = self._market_open()
                         continue
 
-                if not self._market_open():
+                _was_open = self._market_open()
+                if not _was_open:
+                    # Buffer high-urgency premarket events for replay at open
+                    if event.urgency_score >= 0.6:
+                        self._premarket_buffer.append(event)
+                        if len(self._premarket_buffer) > 20:
+                            self._premarket_buffer = self._premarket_buffer[-20:]
+                        logger.debug("[NewsMomentum] Buffered premarket event: {}", event.title[:60])
                     continue
 
                 await self._process_event(event)

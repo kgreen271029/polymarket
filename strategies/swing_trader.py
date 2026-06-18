@@ -149,8 +149,8 @@ class SwingTrader(BaseStrategy):
                 if len(df) >= 55:
                     try:
                         vcp_score = volatility_contraction(df)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("[SwingTrader] VCP calc failed for {}: {}", symbol, e)
                 if vcp_score < 0.3:
                     logger.debug("[SwingTrader] {} VCP very weak ({:.2f}) — skip", symbol, vcp_score)
                     continue

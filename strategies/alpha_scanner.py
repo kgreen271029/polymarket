@@ -75,12 +75,14 @@ class AlphaScanner(BaseStrategy):
                 if df is None or len(df) < 20:
                     continue
                 s = TechnicalAnalyzer.build_signal_summary(df)
+                if not s:
+                    continue
                 vol_ratio = s.get("volume_ratio", 1.0)
                 rsi = s.get("rsi", 50)
                 if vol_ratio > 3.0 and 45 <= rsi <= 65:
                     candidates[symbol] += int(vol_ratio * 2)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("[AlphaScanner] Source3 {} error: {}", symbol, e)
 
         # --- Source 4: stock breakout screen (market hours only) ---
         if self._market_open():
@@ -90,10 +92,12 @@ class AlphaScanner(BaseStrategy):
                     if df is None or len(df) < 22:
                         continue
                     s = TechnicalAnalyzer.build_signal_summary(df)
+                    if not s:
+                        continue
                     if s.get("breakout_20") and s.get("volume_ratio", 1.0) > 1.4:
                         candidates[symbol] += 8
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("[AlphaScanner] Source4 {} error: {}", symbol, e)
 
         # Send top 3 candidates to AI
         open_symbols = {p.split(":")[0] for p in self._portfolio.positions}
@@ -113,6 +117,8 @@ class AlphaScanner(BaseStrategy):
                 if df is None or len(df) < 20:
                     continue
                 sig_summary = TechnicalAnalyzer.build_signal_summary(df)
+                if not sig_summary:
+                    continue
                 price = sig_summary.get("latest_close", 0)
                 if not price:
                     continue

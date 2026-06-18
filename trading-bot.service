@@ -2,6 +2,8 @@
 Description=Agentic Trading Bot — 24/7 auto-restart
 After=network-online.target
 Wants=network-online.target
+# Restart if network drops and comes back
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -9,12 +11,13 @@ User=%i
 WorkingDirectory=/home/user/polymarket
 ExecStart=/bin/bash /home/user/polymarket/run_forever.sh
 Restart=always
-RestartSec=10
+RestartSec=5
+# No restart limit — always come back up
+StartLimitBurst=0
 StandardOutput=append:/home/user/polymarket/logs/service.log
 StandardError=append:/home/user/polymarket/logs/service.log
-
-# Automatically restart even on "success" exit (code 0)
-SuccessExitStatus=0 1 2 3
+# Give the process time to flush logs on graceful shutdown
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
