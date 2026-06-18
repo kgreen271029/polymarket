@@ -21,6 +21,7 @@ from analysis.filters import (
 )
 from analysis.metrics import vix_kelly_fraction, get_adaptive_stats
 from analysis.multifactor import chandelier_exit
+from analysis.regime import detect_regime
 
 WATCHLIST = [
     "AAPL", "MSFT", "NVDA", "TSLA", "SPY", "QQQ",
@@ -68,11 +69,21 @@ class SwingTrader(BaseStrategy):
             logger.info("[SwingTrader] Skipping — {}", regime_reason)
             return []
 
+        # Master regime gate — scales size and can halt new entries
+        regime = await asyncio.to_thread(detect_regime)
+        if not regime.tradeable:
+            logger.info("[SwingTrader] Regime {} — standing aside ({})", regime.name, regime.detail)
+            return []
+        logger.info("[SwingTrader] Regime: {} (size x{:.1f}) — {}",
+                    regime.name, regime.size_mult, regime.detail)
+
         # VIX-based Kelly fraction + adaptive win-rate stats
         kelly_frac, vix_note = await asyncio.to_thread(vix_kelly_fraction)
         if kelly_frac <= 0:
             logger.info("[SwingTrader] {} — no new trades", vix_note)
             return []
+        # Combine VIX Kelly fraction with regime size multiplier
+        kelly_frac *= regime.size_mult
         stats = get_adaptive_stats()
         if stats["adaptive"]:
             logger.info("[SwingTrader] Adaptive stats: win_rate={:.0%} R:R={:.2f} over {} trades",

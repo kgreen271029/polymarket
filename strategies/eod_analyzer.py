@@ -21,6 +21,7 @@ from analysis.filters import (
     kelly_position_size,
 )
 from analysis.multifactor import score_symbol, chandelier_exit
+from analysis.regime import detect_regime
 
 WATCHLIST = [
     # Mega-cap tech
@@ -164,6 +165,9 @@ async def run_eod_scan(ai: AIAnalyzer) -> list[dict]:
     regime_ok, regime_reason = volatility_regime_ok()
     if not regime_ok:
         logger.info("[EOD] Choppy regime detected ({}), lowering score threshold", regime_reason)
+    market_regime = detect_regime()
+    logger.info("[EOD] Market regime: {} (size x{:.1f}) — {}",
+                market_regime.name, market_regime.size_mult, market_regime.detail)
     hot_sectors = top_sectors(3)
     logger.info("[EOD] Hot sectors: {}", hot_sectors)
 
