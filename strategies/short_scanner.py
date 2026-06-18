@@ -252,17 +252,23 @@ class ShortScanner(BaseStrategy):
         return False  # handled by _check_short_exits
 
     async def run(self) -> None:
+        """Exit checks every 60s; full signal generation every 900s."""
         self._running = True
-        logger.info("[Short] Started — scanning for bearish setups every {}s", LOOP_INTERVAL)
+        import time as _time
+        logger.info("[Short] Started — exit checks 60s, signal scan {}s", LOOP_INTERVAL)
+        _last_signal_check: float = 0.0
         while self._running:
             try:
                 await self._check_short_exits()
-                signals = await self.generate_signals()
-                for sig in signals:
-                    await self._signal_bus.put(sig)
-                    logger.info("[Short] → {} {} @ ${:.2f} stop=${:.2f} target=${:.2f}",
-                                sig.side.upper(), sig.symbol, sig.entry_price,
-                                sig.stop_price or 0, sig.take_profit or 0)
+                now = _time.monotonic()
+                if now - _last_signal_check >= LOOP_INTERVAL:
+                    signals = await self.generate_signals()
+                    _last_signal_check = _time.monotonic()
+                    for sig in signals:
+                        await self._signal_bus.put(sig)
+                        logger.info("[Short] → {} {} @ ${:.2f} stop=${:.2f} target=${:.2f}",
+                                    sig.side.upper(), sig.symbol, sig.entry_price,
+                                    sig.stop_price or 0, sig.take_profit or 0)
             except Exception as exc:
                 logger.error("[Short] run error: {}", exc)
-            await asyncio.sleep(LOOP_INTERVAL)
+            await asyncio.sleep(60)

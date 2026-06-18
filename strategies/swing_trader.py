@@ -296,28 +296,38 @@ class SwingTrader(BaseStrategy):
                 logger.error("[SwingTrader] Exit check error {}: {}", sym, e)
 
     async def run(self, market_just_opened: "asyncio.Event | None" = None) -> None:
+        """Run swing trader: exit checks every 60s, signal generation every 900s."""
         self._running = True
-        logger.info("[SwingTrader] Started (interval={}s)", LOOP_INTERVAL)
+        logger.info("[SwingTrader] Started (signal_interval={}s, exit_check=60s)", LOOP_INTERVAL)
+        _last_signal_check: float = 0.0
+        import time as _time
         while self._running:
             try:
+                # Fast path: always check exits every loop iteration (60s)
                 await self._check_exits()
-                signals = await self.generate_signals()
-                for sig in signals:
-                    await self._signal_bus.put(sig)
-                    logger.info("[SwingTrader] → {} {} @ ${:.2f} qty={:.4f}",
-                                sig.side.upper(), sig.symbol, sig.entry_price, sig.qty)
+
+                # Slow path: full signal generation only every LOOP_INTERVAL seconds
+                now = _time.monotonic()
+                if now - _last_signal_check >= LOOP_INTERVAL:
+                    signals = await self.generate_signals()
+                    _last_signal_check = _time.monotonic()
+                    for sig in signals:
+                        await self._signal_bus.put(sig)
+                        logger.info("[SwingTrader] → {} {} @ ${:.2f} qty={:.4f}",
+                                    sig.side.upper(), sig.symbol, sig.entry_price, sig.qty)
             except Exception as exc:
                 logger.error("[SwingTrader] run error: {}", exc)
 
-            # Sleep in 60s chunks so we wake up quickly when market opens
-            remaining = LOOP_INTERVAL
+            # Wait 60s between exit checks; wake early on market-open event
+            remaining = 60
             while remaining > 0 and self._running:
-                chunk = min(60, remaining)
+                chunk = min(30, remaining)
                 if market_just_opened is not None:
                     try:
                         await asyncio.wait_for(market_just_opened.wait(), timeout=float(chunk))
                         logger.info("[SwingTrader] Market-open signal — immediate scan")
-                        break  # re-scan immediately
+                        _last_signal_check = 0.0  # force signal generation now
+                        break
                     except asyncio.TimeoutError:
                         pass
                 else:
