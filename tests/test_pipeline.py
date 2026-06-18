@@ -14,6 +14,7 @@ import sys
 from datetime import datetime, timezone
 
 import pandas as pd
+import pytest
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -112,6 +113,7 @@ def test_risk_manager():
 # 3. Full pipeline: signal -> fill -> portfolio -> exit -> journal
 # ---------------------------------------------------------------------------
 
+@pytest.mark.asyncio
 async def test_full_pipeline():
     print("\n[3] Full pipeline (mock broker)")
     from core.engine import TradingEngine, FillEvent
