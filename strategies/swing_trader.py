@@ -19,6 +19,7 @@ from analysis.filters import (
     top_sectors,
     symbol_in_top_sectors,
 )
+from analysis.metrics import vix_kelly_fraction, get_adaptive_stats
 
 WATCHLIST = [
     "AAPL", "MSFT", "NVDA", "TSLA", "SPY", "QQQ",
@@ -65,6 +66,16 @@ class SwingTrader(BaseStrategy):
         if not regime_ok:
             logger.info("[SwingTrader] Skipping — {}", regime_reason)
             return []
+
+        # VIX-based Kelly fraction + adaptive win-rate stats
+        kelly_frac, vix_note = await asyncio.to_thread(vix_kelly_fraction)
+        if kelly_frac <= 0:
+            logger.info("[SwingTrader] {} — no new trades", vix_note)
+            return []
+        stats = get_adaptive_stats()
+        if stats["adaptive"]:
+            logger.info("[SwingTrader] Adaptive stats: win_rate={:.0%} R:R={:.2f} over {} trades",
+                        stats["win_rate"], stats["avg_win_loss_ratio"], stats["n_trades"])
 
         signals: list[TradeSignal] = []
         open_syms = {p.split(":")[0] for p in self._portfolio.positions}
@@ -126,9 +137,9 @@ class SwingTrader(BaseStrategy):
                     account_cash=cash,
                     entry_price=price,
                     stop_price=stop,
-                    win_rate=0.50,
-                    avg_win_loss_ratio=1.5,
-                    max_pct=0.30,
+                    win_rate=stats["win_rate"],
+                    avg_win_loss_ratio=stats["avg_win_loss_ratio"],
+                    max_pct=kelly_frac,
                 )
                 qty = round(dollar_size / price, 6) if price > 0 else 0
                 if qty <= 0:

@@ -242,7 +242,32 @@ class TradingEngine:
                     take_profit=None,
                 )
             else:
-                self._portfolio.record_close(fill.symbol, fill.fill_price, fill.qty)
+                # Capture entry price before close for journaling
+                pos = self._portfolio.get_open_position(fill.symbol)
+                entry_price = pos.entry_price if pos else fill.fill_price
+                opened_at = pos.opened_at.isoformat() if pos else ""
+                strategy = pos.strategy_name if pos else "unknown"
+
+                pnl = self._portfolio.record_close(fill.symbol, fill.fill_price, fill.qty)
+
+                # Journal the closed trade so Kelly sizing adapts to real win rate
+                try:
+                    from analysis.metrics import record_trade, JournalEntry
+                    pnl_pct = ((fill.fill_price / entry_price - 1) * 100) if entry_price else 0.0
+                    record_trade(JournalEntry(
+                        symbol=fill.symbol,
+                        entry_price=entry_price,
+                        exit_price=fill.fill_price,
+                        qty=fill.qty,
+                        pnl=pnl,
+                        pnl_pct=pnl_pct,
+                        strategy=strategy,
+                        opened_at=opened_at,
+                        closed_at=fill.timestamp.isoformat() if fill.timestamp else "",
+                        reason="exit",
+                    ))
+                except Exception as exc:
+                    logger.debug("[ENGINE] journaling failed: {}", exc)
 
             self.fill_queue.task_done()
 

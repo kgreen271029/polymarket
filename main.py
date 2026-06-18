@@ -22,6 +22,7 @@ from analysis.ai_analyzer import AIAnalyzer
 from strategies.news_momentum import NewsMomentum
 from strategies.swing_trader import SwingTrader
 from strategies.alpha_scanner import AlphaScanner
+from strategies.gap_fill import GapFillTrader
 from strategies.polymarket_strategy import PolymarketStrategy
 from strategies.eod_analyzer import run_once_and_print, format_ideas_report, run_eod_scan
 
@@ -160,10 +161,14 @@ async def main(dry_run: bool = False, eod: bool = False) -> None:
         engine.signal_bus, market_data, social_feed,
         engine.news_queue, ai, portfolio, market_open_fn,
     )
+    gap_fill = GapFillTrader(
+        engine.signal_bus, market_data, robinhood, portfolio, market_open_fn,
+    )
     strategy_coros += [
         news_momentum.run(),
         swing_trader.run(),
         alpha_scanner.run(),
+        gap_fill.run(),
     ]
 
     # Crypto strategies — only if Alpaca is configured
