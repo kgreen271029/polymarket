@@ -241,6 +241,9 @@ class ORBStrategy(BaseStrategy):
                 if not price:
                     continue
                 price = float(price)
+                if price <= 0:
+                    continue
+                self._portfolio.update_price(sym, price)
                 reason = None
                 if pos.stop_loss and price <= pos.stop_loss:
                     reason = f"ORB stop hit @ ${price:.2f} (stop=${pos.stop_loss:.2f})"

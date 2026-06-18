@@ -220,6 +220,9 @@ class ShortScanner(BaseStrategy):
                 if not price:
                     continue
                 price = float(price)
+                if price <= 0:
+                    continue
+                self._portfolio.update_price(sym, price)
 
                 hold_days = (datetime.now(tz=timezone.utc) - pos.opened_at).days
                 reason = None

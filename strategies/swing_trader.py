@@ -245,6 +245,11 @@ class SwingTrader(BaseStrategy):
                 if price is None:
                     continue
                 price = float(price)
+                if price <= 0:
+                    continue
+
+                # Keep portfolio current_price fresh so PnL / capital calcs are accurate
+                self._portfolio.update_price(sym, price)
 
                 # Update highest price tracker for trailing stop
                 if price > pos.highest_price:
