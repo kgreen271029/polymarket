@@ -140,7 +140,9 @@ class TechnicalAnalyzer:
 
     @staticmethod
     def build_signal_summary(df: pd.DataFrame) -> dict:
-        if len(df) < 30:
+        # Require at least 20 bars (allows 5-min intraday with ~20+ bars to qualify).
+        # SMA20/BB/RSI need 20 bars minimum; MACD needs 26 but degrades gracefully.
+        if len(df) < 20:
             return {}
         try:
             latest_close = float(df["close"].iloc[-1])
@@ -166,13 +168,14 @@ class TechnicalAnalyzer:
                 and df.index[-1].date() == _dt_date.today()
             )
             _vol_idx = -2 if _last_is_today else -1
-            latest_vol = float(df["volume"].iloc[_vol_idx])
-            mean_vol_20 = float(df["volume"].iloc[-21:-1].mean())
-            volume_ratio = (latest_vol / mean_vol_20) if mean_vol_20 > 0 else 1.0
+            latest_vol = float(df["volume"].iloc[_vol_idx]) if len(df) >= 2 else float(df["volume"].iloc[-1])
+            _vol_window = min(20, len(df) - 1)
+            mean_vol = float(df["volume"].iloc[-(_vol_window + 1):-1].mean()) if _vol_window > 0 else 0.0
+            volume_ratio = (latest_vol / mean_vol) if mean_vol > 0 else 1.0
 
             breakout_20 = TechnicalAnalyzer.detect_breakout(df)
             sma_20 = TechnicalAnalyzer.sma(df, 20)
-            sma_50 = TechnicalAnalyzer.sma(df, 50)
+            sma_50 = TechnicalAnalyzer.sma(df, min(50, len(df) - 1))
             ema_20 = TechnicalAnalyzer.ema(df, 20)
             atr_val = TechnicalAnalyzer.atr(df)
             price_vs_sma20_pct = (latest_close - sma_20) / sma_20 * 100.0 if sma_20 else 0.0

@@ -75,8 +75,8 @@ class SwingTrader(BaseStrategy):
         if not regime.tradeable:
             logger.info("[SwingTrader] Regime {} — standing aside ({})", regime.name, regime.detail)
             return []
-        logger.info("[SwingTrader] Regime: {} (size x{:.1f}) — {}",
-                    regime.name, regime.size_mult, regime.detail)
+        logger.info("[SwingTrader] Regime: {} (size x{:.1f}, momentum={}) — {}",
+                    regime.name, regime.size_mult, regime.use_momentum, regime.detail)
 
         # VIX-based Kelly fraction + adaptive win-rate stats
         kelly_frac, vix_note = await asyncio.to_thread(vix_kelly_fraction)
@@ -133,13 +133,25 @@ class SwingTrader(BaseStrategy):
                 pct_vs_sma   = s.get("price_vs_sma20_pct", 0)
                 atr          = s.get("atr", price * 0.02)
 
-                if not (
-                    price > 0
-                    and price > sma50                  # Stage-2: above 50-day trend
-                    and -1.0 < pct_vs_sma < 7.0        # allow slight pullback or extension
-                    and 35 <= rsi <= 70                 # expanded RSI sweet spot
-                    and volume_ratio > 1.0              # any above-average volume day
-                ):
+                if regime.use_momentum:
+                    # Momentum mode (bull regime): price above 50MA, Stage-2, breakout-ready
+                    entry_ok = (
+                        price > 0
+                        and price > sma50                  # Stage-2: above 50-day trend
+                        and -1.0 < pct_vs_sma < 7.0        # slight pullback to extension
+                        and 35 <= rsi <= 70
+                        and volume_ratio > 1.0
+                    )
+                else:
+                    # Mean-reversion mode (bear/choppy regime): oversold bounces off support
+                    entry_ok = (
+                        price > 0
+                        and rsi <= 38                       # oversold
+                        and s.get("macd_direction") != "bearish"  # not in freefall
+                        and volume_ratio > 1.2              # volume confirmation of bounce
+                        and pct_vs_sma > -8.0               # not more than 8% below SMA (not in meltdown)
+                    )
+                if not entry_ok:
                     continue
 
                 # VCP filter: compute volatility contraction score and pass to AI.

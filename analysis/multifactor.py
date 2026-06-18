@@ -133,6 +133,6 @@ def chandelier_exit(df: pd.DataFrame, atr_mult: float = 2.5,
         return float(df["close"].iloc[-1]) * 0.92
     hh = float(df["high"].tail(lookback).max())
     atr = float(_atr(df, 14).iloc[-1])
-    if np.isnan(atr):
+    if np.isnan(atr) or atr <= 0:
         atr = float(df["close"].iloc[-1]) * 0.02
     return hh - atr_mult * atr
