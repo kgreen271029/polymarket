@@ -87,20 +87,34 @@ class AIAnalyzer:
     def __init__(self, api_key: str = "", groq_api_key: str = "") -> None:
         self._semaphore = asyncio.Semaphore(3)
         self._groq_key = groq_api_key
-        self._client = None
+        self._anthropic_key = api_key
+        self._client = None        # Groq client (preferred — free, fast)
+        self._anthropic = None     # Anthropic client (fallback)
+        self._backend = "none"
 
         if self._groq_key:
             try:
                 from groq import AsyncGroq
                 self._client = AsyncGroq(api_key=self._groq_key)
+                self._backend = "groq"
                 logger.info("[AI] Using Groq (free) — llama-3.3-70b-versatile")
             except ImportError:
                 logger.warning("[AI] groq package not installed — run: pip install groq")
-        else:
-            logger.warning("[AI] No GROQ_API_KEY set — AI analysis disabled, using rule-based fallback")
+
+        if self._client is None and self._anthropic_key:
+            try:
+                import anthropic
+                self._anthropic = anthropic.AsyncAnthropic(api_key=self._anthropic_key)
+                self._backend = "anthropic"
+                logger.info("[AI] Using Anthropic Claude (claude-haiku-4-5-20251001) for trade analysis")
+            except ImportError:
+                logger.warning("[AI] anthropic package not installed")
+
+        if self._backend == "none":
+            logger.warning("[AI] No AI key configured — using rule-based fallback only")
 
     def _available(self) -> bool:
-        return self._client is not None
+        return self._client is not None or self._anthropic is not None
 
     # ------------------------------------------------------------------ #
     # Public interface                                                      #
@@ -112,6 +126,16 @@ class AIAnalyzer:
             return self._rule_based_decision(context)
 
         user_msg = self._build_user_message(context)
+        try:
+            if self._client is not None:
+                return await self._analyze_groq(user_msg, context)
+            else:
+                return await self._analyze_anthropic(user_msg, context)
+        except Exception as e:
+            logger.warning("[AI] Unexpected error for {}: {} — rule-based fallback", context.symbol, e)
+            return self._rule_based_decision(context)
+
+    async def _analyze_groq(self, user_msg: str, context: AnalysisContext) -> AIDecision:
         try:
             async with self._semaphore:
                 resp = await asyncio.wait_for(
@@ -129,10 +153,31 @@ class AIAnalyzer:
             raw = resp.choices[0].message.content or ""
             return self._parse_response(raw, context.symbol)
         except asyncio.TimeoutError:
-            logger.warning("[AI] Timeout for {} — using rule-based fallback", context.symbol)
+            logger.warning("[AI/Groq] Timeout for {} — rule-based fallback", context.symbol)
             return self._rule_based_decision(context)
         except Exception as e:
-            logger.warning("[AI] Error for {}: {} — using rule-based fallback", context.symbol, e)
+            logger.warning("[AI/Groq] Error for {}: {} — rule-based fallback", context.symbol, e)
+            return self._rule_based_decision(context)
+
+    async def _analyze_anthropic(self, user_msg: str, context: AnalysisContext) -> AIDecision:
+        try:
+            async with self._semaphore:
+                resp = await asyncio.wait_for(
+                    self._anthropic.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=512,
+                        system=_SYSTEM_PROMPT,
+                        messages=[{"role": "user", "content": user_msg}],
+                    ),
+                    timeout=20.0,
+                )
+            raw = resp.content[0].text if resp.content else ""
+            return self._parse_response(raw, context.symbol)
+        except asyncio.TimeoutError:
+            logger.warning("[AI/Anthropic] Timeout for {} — rule-based fallback", context.symbol)
+            return self._rule_based_decision(context)
+        except Exception as e:
+            logger.warning("[AI/Anthropic] Error for {}: {} — rule-based fallback", context.symbol, e)
             return self._rule_based_decision(context)
 
     async def analyze_new_coin(self, coin_data: dict, social_data: dict) -> dict:
@@ -149,16 +194,27 @@ class AIAnalyzer:
         )
         try:
             async with self._semaphore:
-                resp = await asyncio.wait_for(
-                    self._client.chat.completions.create(
-                        model="llama-3.3-70b-versatile",
-                        messages=[{"role": "user", "content": prompt}],
-                        max_tokens=256,
-                        temperature=0.1,
-                    ),
-                    timeout=15.0,
-                )
-            raw = resp.choices[0].message.content or ""
+                if self._client is not None:
+                    resp = await asyncio.wait_for(
+                        self._client.chat.completions.create(
+                            model="llama-3.3-70b-versatile",
+                            messages=[{"role": "user", "content": prompt}],
+                            max_tokens=256,
+                            temperature=0.1,
+                        ),
+                        timeout=15.0,
+                    )
+                    raw = resp.choices[0].message.content or ""
+                else:
+                    resp = await asyncio.wait_for(
+                        self._anthropic.messages.create(
+                            model="claude-haiku-4-5-20251001",
+                            max_tokens=256,
+                            messages=[{"role": "user", "content": prompt}],
+                        ),
+                        timeout=20.0,
+                    )
+                    raw = resp.content[0].text if resp.content else ""
             cleaned = self._extract_json(raw)
             data = json.loads(cleaned)
             return {
