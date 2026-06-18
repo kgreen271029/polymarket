@@ -17,6 +17,7 @@ from brokers.robinhood_broker import RobinhoodBroker
 from brokers.polymarket_broker import PolymarketBroker
 from data.news_feed import NewsFeed
 from data.social_feed import SocialFeed
+from data.yfinance_data import YFinanceDataFeed
 from analysis.ai_analyzer import AIAnalyzer
 from strategies.news_momentum import NewsMomentum
 from strategies.swing_trader import SwingTrader
@@ -114,6 +115,11 @@ async def main(dry_run: bool = False, eod: bool = False) -> None:
     else:
         market_data = None
         logger.info("Alpaca not configured — skipping crypto strategies, using yfinance for stock data")
+
+    # Use yfinance as free market data fallback when Alpaca is not configured
+    if market_data is None:
+        market_data = YFinanceDataFeed()
+        logger.info("Using yfinance for market data (free, no API key needed)")
 
     polymarket_broker = None
     if cfg.has_polymarket():
