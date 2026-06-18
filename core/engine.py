@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import signal
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from loguru import logger
 
@@ -64,33 +65,98 @@ class TradingEngine:
         self._shutdown_event = asyncio.Event()
         # symbol -> (stop, target, strategy) captured at order time, applied on fill
         self._pending_meta: dict[str, tuple] = {}
+        # task_name -> factory callable (for supervised strategy tasks only)
+        self._supervised_factories: dict[str, Callable] = {}
 
     # ------------------------------------------------------------------
     # Entry point
     # ------------------------------------------------------------------
 
-    async def run(self, *extra_tasks: "asyncio.coroutines._CoroutineType[Any, Any, Any]") -> None:
-        """Start the engine and all passed-in strategy/feed coroutines."""
+    async def run(self, *extra_tasks: Any) -> None:
+        """Start the engine and all passed-in strategy/feed coroutines or callables.
+
+        Each item in extra_tasks may be:
+        - A coroutine object (created by calling an async def): runs once, no restart.
+        - An async callable (async def method or functools.partial): wrapped in a
+          supervised immortal loop that auto-restarts with exponential backoff on crash.
+
+        Pass callables (not calls) for strategies you want immortal:
+            engine.run(my_strategy.run)        # restarts on crash
+            engine.run(my_strategy.run())      # runs once, no restart
+        """
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGINT, self._shutdown_handler)
         loop.add_signal_handler(signal.SIGTERM, self._shutdown_handler)
 
-        core_coros = [
-            self._process_signals(),
-            self._process_fills(),
-            self._market_open_gate(),
-            self._daily_reset(),
-            self._watchdog(),
+        # Core coroutines are also supervised — a crash in signal/fill processing must not kill the engine
+        core_factories: list[Callable] = [
+            self._process_signals,
+            self._process_fills,
+            self._market_open_gate,
+            self._daily_reset,
         ]
-        all_coros = list(core_coros) + list(extra_tasks)
 
-        logger.info("TradingEngine starting — spawning {} coroutines", len(all_coros))
-        self._tasks = [asyncio.create_task(c, name=getattr(c, "__name__", repr(c))) for c in all_coros]
+        logger.info("TradingEngine starting — {} core + {} strategy tasks (all supervised)",
+                    len(core_factories), len(extra_tasks))
+
+        self._tasks = [
+            asyncio.create_task(self._supervised(f, f.__name__), name=f.__name__)
+            for f in core_factories
+        ]
+        # Watchdog is NOT supervised (it watches others; if it dies the others still run)
+        self._tasks.append(asyncio.create_task(self._watchdog(), name="_watchdog"))
+
+        for item in extra_tasks:
+            if asyncio.iscoroutine(item):
+                # Already-called coroutine — run once, no restart possible
+                name = getattr(item, "__qualname__", repr(item))
+                self._tasks.append(asyncio.create_task(item, name=name))
+            elif callable(item):
+                # Callable — wrap in supervised immortal loop
+                name = getattr(item, "__qualname__", None) or getattr(item, "__name__", repr(item))
+                self._supervised_factories[name] = item
+                self._tasks.append(asyncio.create_task(self._supervised(item, name), name=name))
+            else:
+                logger.warning("[ENGINE] Unknown task type {}: {}", type(item), item)
 
         try:
             await asyncio.gather(*self._tasks)
         except asyncio.CancelledError:
             logger.info("TradingEngine main gather cancelled — shutdown complete")
+
+    async def _supervised(self, factory: Callable, name: str) -> None:
+        """Run an async callable in an infinite restart loop with exponential backoff.
+
+        Stops only when _shutdown_event is set or the task is cancelled.
+        """
+        backoff = 1
+        while not self._shutdown_event.is_set():
+            try:
+                coro = factory()
+                if not asyncio.iscoroutine(coro):
+                    logger.error("[SUPERVISED] {} returned non-coroutine — stopping supervisor", name)
+                    return
+                await coro
+                # Coroutine returned normally (e.g., strategy exited cleanly)
+                if self._shutdown_event.is_set():
+                    return
+                logger.warning("[SUPERVISED] {} exited cleanly — restarting in {}s", name, backoff)
+            except asyncio.CancelledError:
+                logger.info("[SUPERVISED] {} cancelled — stopping", name)
+                return
+            except Exception as exc:
+                logger.error("[SUPERVISED] {} crashed: {} — restarting in {}s", name, exc, backoff)
+
+            if self._shutdown_event.is_set():
+                return
+
+            # Sleep in 1s chunks so shutdown is noticed quickly
+            slept = 0
+            while slept < backoff and not self._shutdown_event.is_set():
+                await asyncio.sleep(min(1.0, backoff - slept))
+                slept += 1
+
+            backoff = min(backoff * 2, 120)  # cap at 2 minutes
 
     # ------------------------------------------------------------------
     # Signal processing
@@ -375,22 +441,35 @@ class TradingEngine:
     # ------------------------------------------------------------------
 
     async def _watchdog(self) -> None:
-        """Log a heartbeat every 5 minutes; detect and cancel dead tasks."""
+        """Log a heartbeat every 5 minutes; alert on unexpectedly dead core tasks."""
         logger.info("Watchdog started")
+        _core_names = {
+            "_process_signals", "_process_fills", "_market_open_gate",
+            "_daily_reset", "_watchdog",
+        }
         while not self._shutdown_event.is_set():
             await asyncio.sleep(300)
-            alive = [t for t in self._tasks if not t.done()]
-            dead  = [t for t in self._tasks if t.done() and not t.cancelled()]
+            alive   = [t for t in self._tasks if not t.done()]
+            dead    = [t for t in self._tasks if t.done() and not t.cancelled()]
+            supervised_names = set(self._supervised_factories.keys())
             logger.info(
-                "[WATCHDOG] Heartbeat — tasks alive={} done={} | market={} | pnl={:+.2f}",
-                len(alive), len(dead),
+                "[WATCHDOG] Heartbeat — alive={} done={} supervised_immortal={} | market={} | pnl={:+.2f}",
+                len(alive), len(dead), len(supervised_names),
                 "OPEN" if self.market_open else "closed",
                 self._portfolio.total_pnl,
             )
             for t in dead:
-                exc = t.exception()
+                name = t.get_name()
+                # Supervised tasks restart themselves — only log if they exited via exception
+                try:
+                    exc = t.exception()
+                except asyncio.CancelledError:
+                    exc = None
                 if exc:
-                    logger.error("[WATCHDOG] Task {} died with exception: {}", t.get_name(), exc)
+                    if name in _core_names:
+                        logger.critical("[WATCHDOG] CORE task {} died: {} — engine may be degraded", name, exc)
+                    else:
+                        logger.error("[WATCHDOG] Task {} died: {}", name, exc)
 
     # ------------------------------------------------------------------
     # Shutdown

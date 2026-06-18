@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import sys
 
 from loguru import logger
@@ -146,9 +147,11 @@ async def main(dry_run: bool = False, eod: bool = False) -> None:
     market_open_fn = lambda: engine.market_open  # noqa: E731
 
     # --- Strategies (stocks only when no Alpaca) ---
-    strategy_coros = [
-        news_feed.poll_loop(),
-        social_feed.poll_loop(),
+    # Pass callables (not coroutines) so TradingEngine wraps them in supervised
+    # immortal loops — any crash triggers automatic restart with exponential backoff.
+    strategy_coros: list = [
+        news_feed.poll_loop,
+        social_feed.poll_loop,
     ]
 
     # Stock strategies — use yfinance-backed alpha scanner when no Alpaca
@@ -172,13 +175,15 @@ async def main(dry_run: bool = False, eod: bool = False) -> None:
     short_scanner = ShortScanner(
         engine.signal_bus, market_data, robinhood, portfolio, market_open_fn,
     )
+
+    mjo = engine.market_just_opened  # convenience alias
     strategy_coros += [
-        news_momentum.run(),
-        swing_trader.run(market_just_opened=engine.market_just_opened),
-        alpha_scanner.run(),
-        gap_fill.run(market_just_opened=engine.market_just_opened),
-        orb.run(market_just_opened=engine.market_just_opened),
-        short_scanner.run(),
+        news_momentum.run,
+        functools.partial(swing_trader.run, market_just_opened=mjo),
+        alpha_scanner.run,
+        functools.partial(gap_fill.run, market_just_opened=mjo),
+        functools.partial(orb.run, market_just_opened=mjo),
+        short_scanner.run,
     ]
 
     # Crypto strategies — only if Alpaca is configured
@@ -191,11 +196,11 @@ async def main(dry_run: bool = False, eod: bool = False) -> None:
         crypto_scalper   = CryptoScalper(engine.signal_bus, market_data, portfolio, market_open_fn)
         crypto_momentum  = CryptoMomentum(engine.signal_bus, market_data, ai, engine.news_queue, portfolio, market_open_fn)
         new_coin_hunter  = NewCoinHunter(engine.signal_bus, new_coins, social_feed, ai, portfolio, market_open_fn, market_data)
-        strategy_coros  += [crypto_scalper.run(), crypto_momentum.run(), new_coin_hunter.run(), new_coins.poll_loop()]
+        strategy_coros  += [crypto_scalper.run, crypto_momentum.run, new_coin_hunter.run, new_coins.poll_loop]
 
     if cfg.has_polymarket():
         poly_strategy = PolymarketStrategy(engine.signal_bus, polymarket_broker, ai, market_open_fn)
-        strategy_coros.append(poly_strategy.run())
+        strategy_coros.append(poly_strategy.run)
 
     if cfg.has_telegram():
         await notifier.send("🤖 <b>Trading bot started</b>\nRobinhood connected. Watching for setups...")
