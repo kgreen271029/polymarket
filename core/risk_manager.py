@@ -17,12 +17,16 @@ _CONFIDENCE_SCALAR: dict[str, float] = {
     "high": 1.5,
 }
 
-# Minimum lot sizes per asset class to avoid sub-penny / dust trades
+# Minimum lot sizes per asset class to avoid sub-penny / dust trades.
+# Robinhood supports fractional shares down to ~$1, so stocks allow fractions.
 _MIN_LOT: dict[str, float] = {
     "crypto": 0.0001,   # BTC-denominated; crypto qty is in dollars so this is $0.0001
-    "stock": 1.0,       # 1 share minimum
+    "stock": 0.0,       # fractional shares allowed (min enforced by dollar value)
     "polymarket": 1.0,  # 1 contract minimum
 }
+
+# Minimum position dollar value (avoid dust trades / broker rejection)
+_MIN_POSITION_USD = 1.0
 
 # Maximum allowable stop distance as a fraction of entry price
 _MAX_STOP_DISTANCE = 0.10
@@ -45,7 +49,13 @@ class RiskManager:
     # ------------------------------------------------------------------
 
     def check(self, signal: "TradeSignal") -> RiskVerdict:
-        """Run all five risk guards in sequence. Returns first failure or approval."""
+        """Run all risk guards in sequence. Returns first failure or approval."""
+
+        # SELL/exit orders reduce risk — never block them on entry guards.
+        # (Blocking exits would trap the bot in losing positions.)
+        if signal.side.lower() == "sell":
+            return RiskVerdict(approved=True, reason="exit order — guards bypassed",
+                               adjusted_qty=signal.qty)
 
         verdict = self._guard_daily_loss(signal)
         if not verdict.approved:
@@ -55,9 +65,11 @@ class RiskManager:
         if not verdict.approved:
             return verdict
 
-        verdict = self._guard_position_size(signal)
-        if not verdict.approved:
-            return verdict
+        size_verdict = self._guard_position_size(signal)
+        if not size_verdict.approved:
+            return size_verdict
+        # Preserve any qty scaling from the size guard through the rest of the checks
+        final_qty = size_verdict.adjusted_qty if size_verdict.adjusted_qty is not None else signal.qty
 
         verdict = self._guard_pdt(signal)
         if not verdict.approved:
@@ -67,7 +79,7 @@ class RiskManager:
         if not verdict.approved:
             return verdict
 
-        return RiskVerdict(approved=True, reason="all checks passed", adjusted_qty=signal.qty)
+        return RiskVerdict(approved=True, reason="all checks passed", adjusted_qty=final_qty)
 
     def calculate_position_size(self, signal: "TradeSignal", confidence: str) -> float:
         scalar = _CONFIDENCE_SCALAR.get(confidence.lower(), 1.0)
@@ -124,25 +136,34 @@ class RiskManager:
             return RiskVerdict(approved=False, reason=reason)
 
         position_value = signal.qty * signal.entry_price
-        max_value = self._config.MAX_RISK_PER_TRADE
+        # Cap at MAX_RISK_PER_TRADE OR available cash, whichever is smaller
+        available = self._portfolio.get_available_capital()
+        max_value = min(self._config.MAX_RISK_PER_TRADE, available)
 
-        if position_value <= max_value:
-            return RiskVerdict(approved=True, reason="position size OK", adjusted_qty=signal.qty)
-
-        # Scale down rather than outright reject when possible
-        scaled_qty = max_value / signal.entry_price
-        min_lot = _MIN_LOT.get(signal.asset_class, 1.0)
-        if scaled_qty < min_lot:
-            reason = (
-                f"position value {position_value:.2f} > max {max_value:.2f} "
-                f"and scaled qty {scaled_qty:.4f} < min lot {min_lot}"
-            )
+        # Reject dust trades
+        if position_value < _MIN_POSITION_USD and max_value < _MIN_POSITION_USD:
+            reason = f"insufficient capital: only ${available:.2f} available"
             logger.warning(f"[RISK REJECT] {signal.symbol} — {reason}")
             return RiskVerdict(approved=False, reason=reason)
 
-        reason = f"position size scaled from {signal.qty:.4f} to {scaled_qty:.4f}"
+        if position_value <= max_value:
+            if position_value < _MIN_POSITION_USD:
+                reason = f"position value ${position_value:.2f} below ${_MIN_POSITION_USD} minimum"
+                logger.warning(f"[RISK REJECT] {signal.symbol} — {reason}")
+                return RiskVerdict(approved=False, reason=reason)
+            return RiskVerdict(approved=True, reason="position size OK", adjusted_qty=signal.qty)
+
+        # Scale down to fit the cap (fractional shares OK for stocks)
+        scaled_qty = max_value / signal.entry_price
+        scaled_value = scaled_qty * signal.entry_price
+        if scaled_value < _MIN_POSITION_USD:
+            reason = f"scaled position ${scaled_value:.2f} below ${_MIN_POSITION_USD} minimum"
+            logger.warning(f"[RISK REJECT] {signal.symbol} — {reason}")
+            return RiskVerdict(approved=False, reason=reason)
+
+        reason = f"position size scaled from {signal.qty:.6f} to {scaled_qty:.6f} (${scaled_value:.2f})"
         logger.info(f"[RISK SCALE] {signal.symbol} — {reason}")
-        return RiskVerdict(approved=True, reason=reason, adjusted_qty=scaled_qty)
+        return RiskVerdict(approved=True, reason=reason, adjusted_qty=round(scaled_qty, 6))
 
     def _guard_pdt(self, signal: "TradeSignal") -> RiskVerdict:
         if signal.asset_class != "stock":

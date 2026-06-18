@@ -20,6 +20,7 @@ from analysis.filters import (
     symbol_in_top_sectors,
     kelly_position_size,
 )
+from analysis.multifactor import score_symbol, chandelier_exit
 
 WATCHLIST = [
     # Mega-cap tech
@@ -166,6 +167,9 @@ async def run_eod_scan(ai: AIAnalyzer) -> list[dict]:
     hot_sectors = top_sectors(3)
     logger.info("[EOD] Hot sectors: {}", hot_sectors)
 
+    # SPY for relative-strength factor in multi-factor scoring
+    spy_df = _fetch_bars("SPY", period="6mo")
+
     candidates: list[dict] = []
 
     for symbol in WATCHLIST:
@@ -188,6 +192,15 @@ async def run_eod_scan(ai: AIAnalyzer) -> list[dict]:
 
             score = _score_setup(sig, gap, has_earnings)
 
+            # Multi-factor composite (momentum/trend/RS/VCP) — blend 50/50
+            mf = {"composite": 50.0}
+            if spy_df is not None and len(df) >= 60:
+                try:
+                    mf = score_symbol(df, spy_df)
+                    score = int(score * 0.5 + mf["composite"] * 0.5)
+                except Exception:
+                    pass
+
             # Bonus for hot sector alignment
             if in_hot_sector:
                 score = min(100, score + 8)
@@ -209,6 +222,7 @@ async def run_eod_scan(ai: AIAnalyzer) -> list[dict]:
                 "sec_ok":        sec_ok,
                 "sec_note":      sec_note,
                 "in_hot_sector": in_hot_sector,
+                "multifactor":   mf.get("composite", 0),
                 "price":         sig.get("latest_close", 0),
                 "regime_ok":     regime_ok,
             })

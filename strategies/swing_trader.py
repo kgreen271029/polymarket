@@ -20,6 +20,7 @@ from analysis.filters import (
     symbol_in_top_sectors,
 )
 from analysis.metrics import vix_kelly_fraction, get_adaptive_stats
+from analysis.multifactor import chandelier_exit
 
 WATCHLIST = [
     "AAPL", "MSFT", "NVDA", "TSLA", "SPY", "QQQ",
@@ -180,16 +181,15 @@ class SwingTrader(BaseStrategy):
 
     async def should_exit(self, position) -> bool:
         try:
-            df = await self._market_data.get_bars(position.symbol, "1Day", limit=30)
+            df = await self._market_data.get_bars(position.symbol, "1Day", limit=40)
             if df is None or len(df) < 20:
                 return False
             s = TechnicalAnalyzer.build_signal_summary(df)
             rsi = s.get("rsi", 50)
             pct_vs_sma = s.get("price_vs_sma20_pct", 0)
-            # Bearish divergence check
-            import pandas as pd
-            rsi_series   = pd.Series(s.get("rsi_series", [rsi]))
-            price_series = df["close"] if "close" in df.columns else pd.Series([position.entry_price])
+            # Bearish divergence check using full RSI series from the df
+            rsi_series   = TechnicalAnalyzer.rsi_series(df)
+            price_series = df["close"]
             div = bearish_divergence(price_series, rsi_series)
             return rsi > 72 or pct_vs_sma < -2.5 or div
         except Exception:
@@ -209,11 +209,18 @@ class SwingTrader(BaseStrategy):
                     continue
                 price = float(price)
 
-                # Update trailing stop
-                high_since = max(price, getattr(pos, "_highest_price", pos.entry_price))
-                pos._highest_price = high_since  # type: ignore[attr-defined]
-                atr = (pos.entry_price * 0.02)   # rough 2% ATR if not stored
-                trail_stop = atr_trailing_stop(pos.entry_price, atr, high_since)
+                # Chandelier exit: ATR-based trailing stop from recent highs
+                trail_stop = 0.0
+                try:
+                    df = await self._market_data.get_bars(sym, "1Day", limit=30)
+                    if df is not None and len(df) >= 22:
+                        trail_stop = chandelier_exit(df, atr_mult=2.5)
+                except Exception:
+                    pass
+                if trail_stop <= 0:
+                    high_since = max(price, getattr(pos, "_highest_price", pos.entry_price))
+                    pos._highest_price = high_since  # type: ignore[attr-defined]
+                    trail_stop = atr_trailing_stop(pos.entry_price, pos.entry_price * 0.02, high_since)
                 effective_stop = max(pos.stop_loss or 0, trail_stop)
 
                 reason = None

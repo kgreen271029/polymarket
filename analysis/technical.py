@@ -95,6 +95,30 @@ class TechnicalAnalyzer:
         return close if pd.isna(val) else float(val)
 
     @staticmethod
+    def atr(df: pd.DataFrame, period: int = 14) -> float:
+        """Average True Range — volatility measure."""
+        if len(df) < period + 1:
+            # fall back to a rough range estimate
+            if len(df) >= 2:
+                rng = (df["high"] - df["low"]).tail(period).mean()
+                return float(rng) if not pd.isna(rng) else 0.0
+            return 0.0
+        h, l, c = df["high"], df["low"], df["close"]
+        prev_c = c.shift(1)
+        tr = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+        val = tr.ewm(com=period - 1, min_periods=period).mean().iloc[-1]
+        return 0.0 if pd.isna(val) else float(val)
+
+    @staticmethod
+    def rsi_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """Full RSI series (for divergence detection)."""
+        delta = df["close"].diff()
+        gain = delta.clip(lower=0).ewm(com=period - 1, min_periods=period).mean()
+        loss = (-delta.clip(upper=0)).ewm(com=period - 1, min_periods=period).mean()
+        rs = gain / loss.replace(0, float("nan"))
+        return (100 - (100 / (1 + rs))).fillna(50.0)
+
+    @staticmethod
     def detect_volume_spike(
         df: pd.DataFrame,
         lookback: int = 20,
@@ -139,7 +163,9 @@ class TechnicalAnalyzer:
 
             breakout_20 = TechnicalAnalyzer.detect_breakout(df)
             sma_20 = TechnicalAnalyzer.sma(df, 20)
+            sma_50 = TechnicalAnalyzer.sma(df, 50)
             ema_20 = TechnicalAnalyzer.ema(df, 20)
+            atr_val = TechnicalAnalyzer.atr(df)
             price_vs_sma20_pct = (latest_close - sma_20) / sma_20 * 100.0 if sma_20 else 0.0
 
             above_ema = latest_close > ema_20
@@ -160,6 +186,9 @@ class TechnicalAnalyzer:
                 "volume_ratio": volume_ratio,
                 "breakout_20": breakout_20,
                 "sma_20": sma_20,
+                "sma_50": sma_50,
+                "ema_20": ema_20,
+                "atr": atr_val,
                 "price_vs_sma20_pct": price_vs_sma20_pct,
                 "trend": trend,
                 "latest_close": latest_close,

@@ -298,10 +298,39 @@ class RobinhoodBroker:
             result = await asyncio.shield(self._call_tool("place_equity_order", args))
             order_id = result.get("id") or result.get("order_id") or str(result)
             logger.info("[RH] Order placed: {} {} qty={} id={}", side.upper(), symbol, qty, order_id)
+
+            # Emit a FillEvent so the portfolio + journal update.
+            # Market orders fill near the live quote; use it as the fill price.
+            try:
+                fill_price = await self.get_quote_price(symbol)
+                if fill_price <= 0 and limit_price:
+                    fill_price = float(limit_price)
+                await self._emit_fill(str(order_id), symbol, side.lower(), float(qty), fill_price)
+            except Exception as fe:
+                logger.warning("[RH] could not emit fill for {}: {}", symbol, fe)
+
             return str(order_id)
         except Exception as e:
             logger.error("[RH] place_order({}) failed: {}", symbol, e)
             return None
+
+    async def _emit_fill(self, order_id: str, symbol: str, side: str,
+                         qty: float, fill_price: float) -> None:
+        """Push a FillEvent onto the engine fill queue so state stays in sync."""
+        if self._fill_queue is None:
+            return
+        from datetime import datetime, timezone
+        from core.engine import FillEvent
+        await self._fill_queue.put(FillEvent(
+            order_id=order_id,
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            fill_price=fill_price,
+            asset_class="stock",
+            timestamp=datetime.now(tz=timezone.utc),
+        ))
+        logger.info("[RH] Fill emitted: {} {} qty={:.4f} @ ${:.2f}", side.upper(), symbol, qty, fill_price)
 
     async def cancel_order(self, order_id: str) -> bool:
         if not self._available():

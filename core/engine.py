@@ -99,6 +99,8 @@ class TradingEngine:
         self.market_open: bool = False
         self._tasks: list[asyncio.Task[Any]] = []
         self._shutdown_event = asyncio.Event()
+        # symbol -> (stop, target, strategy) captured at order time, applied on fill
+        self._pending_meta: dict[str, tuple] = {}
 
     # ------------------------------------------------------------------
     # Entry point
@@ -183,6 +185,14 @@ class TradingEngine:
         )
 
         try:
+            # Capture stop/target so they survive into the Position on fill
+            if signal_obj.side == "buy":
+                self._pending_meta[signal_obj.symbol] = (
+                    signal_obj.stop_price,
+                    signal_obj.take_profit,
+                    signal_obj.strategy_name,
+                )
+
             if signal_obj.asset_class == "crypto" and self._alpaca_broker:
                 await asyncio.to_thread(self._alpaca_broker.submit_order, signal_obj)
             elif signal_obj.asset_class == "stock" and self._robinhood_broker:
@@ -228,8 +238,10 @@ class TradingEngine:
                 continue
 
             if fill.side == "buy":
-                # Stop/TP come from the originating signal; broker should embed them in the fill
-                # if available, otherwise None is acceptable — risk guard already validated stop
+                # Apply stop/target/strategy captured when the order was routed
+                stop, target, strat = self._pending_meta.pop(
+                    fill.symbol, (None, None, "unknown")
+                )
                 self._portfolio.record_fill(
                     symbol=fill.symbol,
                     side="long",
@@ -237,9 +249,9 @@ class TradingEngine:
                     fill_price=fill.fill_price,
                     order_id=fill.order_id,
                     asset_class=fill.asset_class,
-                    strategy_name="unknown",
-                    stop_loss=None,
-                    take_profit=None,
+                    strategy_name=strat,
+                    stop_loss=stop,
+                    take_profit=target,
                 )
             else:
                 # Capture entry price before close for journaling
