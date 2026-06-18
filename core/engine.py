@@ -11,6 +11,7 @@ from loguru import logger
 if TYPE_CHECKING:
     from core.portfolio import PortfolioTracker
     from core.risk_manager import RiskManager
+    from strategies.base_strategy import TradeSignal
 
 
 # ---------------------------------------------------------------------------

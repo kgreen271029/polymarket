@@ -83,8 +83,11 @@ class Config:
     def validate(self) -> list[str]:
         """Return list of missing critical keys."""
         missing = []
-        if not self.robinhood_mcp_token:
-            missing.append("ROBINHOOD_MCP_TOKEN (run get_robinhood_token.py)")
+        if not self.has_robinhood() and not self.has_alpaca() and not self.has_polymarket():
+            missing.append(
+                "No broker configured — set at least one of: "
+                "ROBINHOOD_MCP_TOKEN, ALPACA_API_KEY+ALPACA_API_SECRET, POLYMARKET_PRIVATE_KEY"
+            )
         return missing
 
     def has_ai(self) -> bool:

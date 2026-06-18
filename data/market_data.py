@@ -271,7 +271,8 @@ class MarketDataFeed:
         df = df[keep].copy()
         df["timestamp"] = df.index
 
-        return df.reset_index(drop=True)
+        # Preserve DatetimeIndex so strategies can filter by time (ORB session filter, etc.)
+        return df
 
     # ------------------------------------------------------------------
     # Snapshot (latest quote + trade)

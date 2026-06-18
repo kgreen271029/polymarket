@@ -161,14 +161,14 @@ async def run_eod_scan(ai: AIAnalyzer, available_capital: float = 100.0) -> list
     """
     logger.info("[EOD] Starting end-of-day scan for {} symbols...", len(WATCHLIST))
 
-    # Market-wide filters (run once)
-    regime_ok, regime_reason = volatility_regime_ok()
+    # Market-wide filters (run once) — wrapped in to_thread to avoid blocking event loop
+    regime_ok, regime_reason = await asyncio.to_thread(volatility_regime_ok)
     if not regime_ok:
         logger.info("[EOD] Choppy regime detected ({}), lowering score threshold", regime_reason)
-    market_regime = detect_regime()
+    market_regime = await asyncio.to_thread(detect_regime)
     logger.info("[EOD] Market regime: {} (size x{:.1f}) — {}",
                 market_regime.name, market_regime.size_mult, market_regime.detail)
-    hot_sectors = top_sectors(3)
+    hot_sectors = await asyncio.to_thread(top_sectors, 3)
     logger.info("[EOD] Hot sectors: {}", hot_sectors)
 
     # SPY for relative-strength factor in multi-factor scoring

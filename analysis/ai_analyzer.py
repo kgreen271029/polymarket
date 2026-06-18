@@ -84,9 +84,8 @@ class AIAnalyzer:
     Add to .env: GROQ_API_KEY=gsk_...
     """
 
-    _semaphore: asyncio.Semaphore = asyncio.Semaphore(3)
-
     def __init__(self, api_key: str = "", groq_api_key: str = "") -> None:
+        self._semaphore = asyncio.Semaphore(3)
         self._groq_key = groq_api_key
         self._client = None
 
@@ -114,7 +113,7 @@ class AIAnalyzer:
 
         user_msg = self._build_user_message(context)
         try:
-            async with self.__class__._semaphore:
+            async with self._semaphore:
                 resp = await asyncio.wait_for(
                     self._client.chat.completions.create(
                         model="llama-3.3-70b-versatile",
@@ -149,7 +148,7 @@ class AIAnalyzer:
             f"Social velocity: {social_data.get('social_velocity')}x"
         )
         try:
-            async with self.__class__._semaphore:
+            async with self._semaphore:
                 resp = await asyncio.wait_for(
                     self._client.chat.completions.create(
                         model="llama-3.3-70b-versatile",

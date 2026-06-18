@@ -181,7 +181,7 @@ class SwingTrader(BaseStrategy):
                     news_headlines=[],
                     available_capital=cash,
                     open_position_count=len(self._portfolio.positions),
-                    daily_pnl_pct=self._portfolio.daily_pnl,
+                    daily_pnl_pct=self._portfolio.daily_pnl_pct,
                 )
                 decision = await self._ai.analyze(context)
 

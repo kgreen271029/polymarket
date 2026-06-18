@@ -72,15 +72,13 @@ class PolymarketStrategy(BaseStrategy):
                 if decision.recommendation not in ("BUY", "SELL"):
                     continue
 
-                ai_prob = decision.stop_price if decision.stop_price else None
-                if ai_prob is None:
-                    continue
-
-                edge = abs(ai_prob - yes_price)
+                # BUY recommendation → AI thinks outcome is more likely than priced → bet YES
+                # SELL recommendation → AI thinks outcome is less likely than priced → bet NO
+                # Edge is approximated by how far yes_price is from 0.5 (mispricing size)
+                trade_yes = decision.recommendation == "BUY"
+                edge = abs(yes_price - 0.5)
                 if edge < EDGE_THRESHOLD:
                     continue
-
-                trade_yes = ai_prob > yes_price
                 # qty = number of contracts = $10 / price
                 qty = round(MAX_POSITION / yes_price, 4) if yes_price > 0 else 0
                 if qty <= 0:

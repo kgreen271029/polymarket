@@ -119,7 +119,7 @@ class NewsMomentum(BaseStrategy):
                         news_headlines=[event.title],
                         available_capital=self._portfolio.get_available_capital(),
                         open_position_count=len(self._portfolio.positions),
-                        daily_pnl_pct=self._portfolio.daily_pnl,
+                        daily_pnl_pct=self._portfolio.daily_pnl_pct,
                     )
                     decision = await self._ai.analyze(context)
                     if decision.recommendation != "BUY":

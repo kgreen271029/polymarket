@@ -176,14 +176,23 @@ class PortfolioTracker:
     # ------------------------------------------------------------------
 
     def get_available_capital(self) -> float:
-        """Cash minus a conservative stop-order margin reserve for open positions."""
+        """Cash minus worst-case loss reserve for all open stop orders."""
         reserved = 0.0
         for pos in self.positions.values():
             if pos.stop_loss is not None:
-                # Reserve the worst-case exit value at the stop price
-                reserved += pos.qty * pos.stop_loss
-        # Never let reserved exceed actual cash
+                # Reserve only the max loss (stop distance × qty), not the full position value
+                reserved += pos.qty * abs(pos.entry_price - pos.stop_loss)
         return max(0.0, self.cash - reserved)
+
+    @property
+    def daily_pnl_pct(self) -> float:
+        """Daily P&L as a percentage of current portfolio value."""
+        portfolio_value = self.cash + sum(
+            p.qty * p.current_price for p in self.positions.values()
+        )
+        if portfolio_value <= 0:
+            return 0.0
+        return (self.daily_pnl / portfolio_value) * 100
 
     def get_open_position(self, symbol: str) -> Position | None:
         return self.positions.get(f"{symbol}:long") or self.positions.get(f"{symbol}:short")
