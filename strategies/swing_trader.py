@@ -118,5 +118,54 @@ class SwingTrader(BaseStrategy):
         except Exception:
             return False
 
+    async def _check_exits(self) -> None:
+        """Check open positions against stop/target and fire sell signals."""
+        if not self._market_open():
+            return
+        for sym, pos in list(self._portfolio.positions.items()):
+            if getattr(pos, "asset_class", "") != "stock":
+                continue
+            try:
+                quote = await self._rh.get_quote_price(sym)
+                if quote is None:
+                    continue
+                price = float(quote)
+                stop   = getattr(pos, "stop_loss",   None)
+                target = getattr(pos, "take_profit",  None)
+                qty    = getattr(pos, "qty",          0)
+
+                reason = None
+                if stop   and price <= stop:   reason = f"stop hit @ {price:.2f}"
+                elif target and price >= target: reason = f"target hit @ {price:.2f}"
+                elif await self.should_exit(pos): reason = f"technical exit @ {price:.2f}"
+
+                if reason:
+                    logger.info("[SwingTrader] EXIT {} — {}", sym, reason)
+                    await self._signal_bus.put(TradeSignal(
+                        symbol=sym,
+                        side="sell",
+                        asset_class="stock",
+                        strategy_name=self.name,
+                        entry_price=price,
+                        stop_price=None,
+                        take_profit=None,
+                        confidence="High",
+                        reasoning=reason,
+                        qty=qty,
+                    ))
+            except Exception as e:
+                logger.error("[SwingTrader] Exit check error {}: {}", sym, e)
+
     async def run(self) -> None:
-        await self.run_loop(LOOP_INTERVAL)
+        self._running = True
+        logger.info("[SwingTrader] Started (interval={}s)", LOOP_INTERVAL)
+        while self._running:
+            try:
+                await self._check_exits()
+                signals = await self.generate_signals()
+                for sig in signals:
+                    await self._signal_bus.put(sig)
+                    logger.info("[SwingTrader] → {} {} @ {:.2f}", sig.side.upper(), sig.symbol, sig.entry_price)
+            except Exception as exc:
+                logger.error("[SwingTrader] run error: {}", exc)
+            await asyncio.sleep(LOOP_INTERVAL)

@@ -251,16 +251,27 @@ class TradingEngine:
     # ------------------------------------------------------------------
 
     async def _market_open_gate(self) -> None:
-        """Polls Alpaca's clock endpoint every 60 s and updates self.market_open."""
+        """Updates self.market_open every 60 s. Uses Alpaca clock when available,
+        falls back to a simple NYSE time-range check (9:30–16:00 ET, Mon–Fri)."""
+        import zoneinfo
+        from datetime import time as dtime
+        ET = zoneinfo.ZoneInfo("America/New_York")
+
         logger.info("Market gate started")
         while not self._shutdown_event.is_set():
             try:
-                clock = await asyncio.to_thread(self._alpaca_broker.get_clock)
-                self.market_open = bool(clock.is_open)
+                if self._alpaca_broker is not None:
+                    clock = await asyncio.to_thread(self._alpaca_broker.get_clock)
+                    self.market_open = bool(clock.is_open)
+                else:
+                    now = datetime.now(tz=ET)
+                    self.market_open = (
+                        now.weekday() < 5
+                        and dtime(9, 30) <= now.time() < dtime(16, 0)
+                    )
                 logger.debug("Market status: {}", "OPEN" if self.market_open else "CLOSED")
             except Exception as exc:
                 logger.warning("[ENGINE] Could not fetch market clock: {}", exc)
-                # Fail closed for stock signals on API error
                 self.market_open = False
 
             await asyncio.sleep(60)
