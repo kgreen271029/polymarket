@@ -1,0 +1,47 @@
+name: EOD Nightly Scan
+
+on:
+  schedule:
+    # 4:15 PM ET Mon-Fri (20:15 UTC in summer)
+    - cron: '15 20 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  eod:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: claude/agentic-trading-bot-jaqt4l
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write .env from secrets
+        run: |
+          cat > .env << 'EOF'
+          ROBINHOOD_MCP_TOKEN=${{ secrets.ROBINHOOD_MCP_TOKEN }}
+          ROBINHOOD_REFRESH_TOKEN=${{ secrets.ROBINHOOD_REFRESH_TOKEN }}
+          ROBINHOOD_CLIENT_ID=${{ secrets.ROBINHOOD_CLIENT_ID }}
+          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+          GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
+          STARTING_CAPITAL=92.65
+          MAX_RISK_PER_TRADE=20.0
+          DAILY_LOSS_LIMIT_PCT=0.15
+          MAX_OPEN_POSITIONS=6
+          LOG_LEVEL=INFO
+          EOF
+
+      - name: Run EOD analysis
+        run: python main.py --eod

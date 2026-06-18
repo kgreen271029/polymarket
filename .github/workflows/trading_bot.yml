@@ -1,0 +1,59 @@
+name: Trading Bot — Market Hours
+
+on:
+  schedule:
+    # 9:25 AM ET Mon-Fri (ET = UTC-4 in summer, so 13:25 UTC)
+    - cron: '25 13 * * 1-5'
+  workflow_dispatch:   # also lets you trigger manually from GitHub.com
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 420   # 7 hours — covers full market session
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: claude/agentic-trading-bot-jaqt4l
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write .env from secrets
+        run: |
+          cat > .env << 'EOF'
+          ALPACA_API_KEY=
+          ALPACA_API_SECRET=
+          ROBINHOOD_MCP_TOKEN=${{ secrets.ROBINHOOD_MCP_TOKEN }}
+          ROBINHOOD_REFRESH_TOKEN=${{ secrets.ROBINHOOD_REFRESH_TOKEN }}
+          ROBINHOOD_CLIENT_ID=${{ secrets.ROBINHOOD_CLIENT_ID }}
+          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+          GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
+          POLYMARKET_PRIVATE_KEY=
+          POLYMARKET_API_KEY=
+          POLYMARKET_API_SECRET=
+          POLYMARKET_API_PASSPHRASE=
+          NEWS_API_KEY=
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
+          STARTING_CAPITAL=92.65
+          MAX_RISK_PER_TRADE=20.0
+          DAILY_LOSS_LIMIT_PCT=0.15
+          MAX_OPEN_POSITIONS=6
+          LOG_LEVEL=INFO
+          EOF
+
+      - name: Dry run check
+        run: python main.py --dry-run
+
+      - name: Run trading bot (market hours)
+        run: |
+          echo "Market opens in ~5 minutes. Starting bot..."
+          python main.py
