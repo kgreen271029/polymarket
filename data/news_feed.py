@@ -363,6 +363,7 @@ class NewsFeed:
         Remove duplicate events using SHA-256 of (title[:50] + source + date).
 
         Already-seen hashes are stored in self._seen across poll cycles.
+        Capped at 10,000 entries to prevent unbounded memory growth over long runs.
         """
         unique: list[HeadlineEvent] = []
         for event in events:
@@ -372,6 +373,9 @@ class NewsFeed:
             if digest not in self._seen:
                 self._seen.add(digest)
                 unique.append(event)
+        # Evict oldest entries when set grows too large (approximate FIFO via rebuild)
+        if len(self._seen) > 10_000:
+            self._seen = set(list(self._seen)[-5_000:])
         return unique
 
     # ------------------------------------------------------------------
