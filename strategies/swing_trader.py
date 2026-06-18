@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import Callable
 
 from loguru import logger
@@ -20,7 +21,7 @@ from analysis.filters import (
     symbol_in_top_sectors,
 )
 from analysis.metrics import vix_kelly_fraction, get_adaptive_stats
-from analysis.multifactor import chandelier_exit
+from analysis.multifactor import chandelier_exit, score_symbol, volatility_contraction
 from analysis.regime import detect_regime
 
 WATCHLIST = [
@@ -125,26 +126,36 @@ class SwingTrader(BaseStrategy):
                 if not s:
                     continue
 
-                price      = s.get("latest_close", 0)
-                rsi        = s.get("rsi", 50)
-                sma20      = s.get("sma_20", 0)
-                sma50      = s.get("sma_50", price)
+                price        = s.get("latest_close", 0)
+                rsi          = s.get("rsi", 50)
+                sma50        = s.get("sma_50", price)
                 volume_ratio = s.get("volume_ratio", 1.0)
-                pct_vs_sma = s.get("price_vs_sma20_pct", 0)
-                atr        = s.get("atr", price * 0.02)
+                pct_vs_sma   = s.get("price_vs_sma20_pct", 0)
+                atr          = s.get("atr", price * 0.02)
 
                 if not (
                     price > 0
-                    and price > sma50                  # above 50-day trend
-                    and 0 < pct_vs_sma < 4.0           # just above 20-SMA
+                    and price > sma50                  # Stage-2: above 50-day trend
+                    and 0 < pct_vs_sma < 3.5           # tightly above 20-SMA (was 4.0)
                     and 38 <= rsi <= 65                 # RSI sweet spot
                     and volume_ratio > 1.3              # volume conviction
                 ):
                     continue
 
-                # ATR-based stop and Kelly sizing
-                stop   = round(price - 2.0 * atr, 2)
-                target = round(price + 3.0 * atr, 2)
+                # VCP filter: volatility must be contracting (ATR ratio < 1.0 = tightening)
+                vcp_score = 0.3
+                if len(df) >= 55:
+                    try:
+                        vcp_score = volatility_contraction(df)
+                    except Exception:
+                        pass
+                if vcp_score < 0.5:
+                    logger.debug("[SwingTrader] {} VCP weak ({:.2f}) — skip", symbol, vcp_score)
+                    continue
+
+                # ATR-based stop and Kelly sizing (use 2.2x ATR — research optimal vs 2.0)
+                stop   = round(price - 2.2 * atr, 2)
+                target = round(price + 3.3 * atr, 2)  # 1.5:1 R:R minimum
                 dollar_size = kelly_position_size(
                     account_cash=cash,
                     entry_price=price,
@@ -163,7 +174,8 @@ class SwingTrader(BaseStrategy):
                     asset_class="stock",
                     strategy_name=self.name,
                     proposed_action="BUY",
-                    signal_summary={**s, "sector_ok": sec_reason, "regime": regime_reason},
+                    signal_summary={**s, "sector_ok": sec_reason, "regime": regime.detail,
+                                    "vcp_score": round(vcp_score, 2)},
                     news_headlines=[],
                     available_capital=cash,
                     open_position_count=len(self._portfolio.positions),
@@ -207,7 +219,7 @@ class SwingTrader(BaseStrategy):
             return False
 
     async def _check_exits(self) -> None:
-        """Monitor open positions against stop/target/trailing stop."""
+        """Monitor open positions against stop/target/trailing stop/max hold."""
         if not self._market_open():
             return
         for key, pos in list(self._portfolio.positions.items()):
@@ -220,6 +232,10 @@ class SwingTrader(BaseStrategy):
                     continue
                 price = float(price)
 
+                # Update highest price tracker for trailing stop
+                if price > pos.highest_price:
+                    pos.highest_price = price
+
                 # Chandelier exit: ATR-based trailing stop from recent highs
                 trail_stop = 0.0
                 try:
@@ -229,16 +245,22 @@ class SwingTrader(BaseStrategy):
                 except Exception:
                     pass
                 if trail_stop <= 0:
-                    high_since = max(price, getattr(pos, "_highest_price", pos.entry_price))
-                    pos._highest_price = high_since  # type: ignore[attr-defined]
-                    trail_stop = atr_trailing_stop(pos.entry_price, pos.entry_price * 0.02, high_since)
+                    trail_stop = atr_trailing_stop(
+                        pos.entry_price, pos.entry_price * 0.02, pos.highest_price
+                    )
                 effective_stop = max(pos.stop_loss or 0, trail_stop)
+
+                # Max holding period: cut losers after 10 calendar days
+                hold_days = (datetime.now(tz=pos.opened_at.tzinfo) - pos.opened_at).days
+                max_hold_exit = hold_days >= 10 and price < pos.entry_price
 
                 reason = None
                 if price <= effective_stop:
                     reason = f"stop/trail hit @ ${price:.2f} (stop=${effective_stop:.2f})"
                 elif pos.take_profit and price >= pos.take_profit:
                     reason = f"target hit @ ${price:.2f}"
+                elif max_hold_exit:
+                    reason = f"max hold ({hold_days}d) exit @ ${price:.2f}"
                 elif await self.should_exit(pos):
                     reason = f"technical exit @ ${price:.2f}"
 

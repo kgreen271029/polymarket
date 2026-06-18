@@ -29,7 +29,8 @@ _MIN_LOT: dict[str, float] = {
 _MIN_POSITION_USD = 1.0
 
 # Maximum allowable stop distance as a fraction of entry price
-_MAX_STOP_DISTANCE = 0.10
+# 2.2×ATR for high-vol stocks (NVDA, MSTR) can exceed 10% — allow up to 15%
+_MAX_STOP_DISTANCE = 0.15
 
 
 @dataclass
@@ -166,21 +167,17 @@ class RiskManager:
         return RiskVerdict(approved=True, reason=reason, adjusted_qty=round(scaled_qty, 6))
 
     def _guard_pdt(self, signal: "TradeSignal") -> RiskVerdict:
+        # PDT rule eliminated by FINRA on June 4, 2026 — no longer enforced
+        # Keeping the guard as a no-op to log activity for audit purposes only
         if signal.asset_class != "stock":
             return RiskVerdict(approved=True, reason="PDT N/A for non-stock")
 
         day_trade_count = self._portfolio.get_day_trade_count()
         would_be_day_trade = self._portfolio.is_day_trade(signal.symbol)
+        if would_be_day_trade:
+            logger.info(f"[RISK] {signal.symbol} day-trade #{day_trade_count+1} (PDT rule removed Jun 2026)")
 
-        if day_trade_count >= 3 and would_be_day_trade:
-            reason = (
-                f"PDT limit: {day_trade_count} day trades in rolling 5-day window; "
-                f"{signal.symbol} was opened today and closing would be day trade #4+"
-            )
-            logger.warning(f"[RISK REJECT] {signal.symbol} — {reason}")
-            return RiskVerdict(approved=False, reason=reason)
-
-        return RiskVerdict(approved=True, reason="PDT OK")
+        return RiskVerdict(approved=True, reason="PDT OK (rule removed Jun 2026)")
 
     def _guard_stop_loss(self, signal: "TradeSignal") -> RiskVerdict:
         if signal.stop_price is None:

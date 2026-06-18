@@ -256,6 +256,7 @@ async def run_eod_scan(ai: AIAnalyzer) -> list[dict]:
             decision = await ai.analyze(ctx)
             if decision.recommendation == "HOLD":
                 continue
+            atr = c["sig"].get("atr", c["price"] * 0.02)
             ideas.append({
                 "symbol": c["symbol"],
                 "price": c["price"],
@@ -264,12 +265,15 @@ async def run_eod_scan(ai: AIAnalyzer) -> list[dict]:
                 "earnings_soon": c["earnings_soon"],
                 "recommendation": decision.recommendation,
                 "confidence": decision.confidence,
-                "stop": decision.stop_price,
-                "target": decision.take_profit,
+                "stop": decision.stop_price or round(c["price"] - 2.2 * atr, 2),
+                "target": decision.take_profit or round(c["price"] + 3.3 * atr, 2),
                 "reasoning": decision.reasoning,
                 "rsi": c["sig"].get("rsi", 0),
                 "trend": c["sig"].get("trend", ""),
                 "vol_ratio": c["sig"].get("volume_ratio", 1.0),
+                "vcp": c["multifactor"],
+                "rs": round(c["multifactor"] - 50, 1),  # relative strength delta from avg
+                "chandelier_stop": 0.0,  # filled below if bars available
             })
         except Exception as e:
             logger.error("[EOD] AI analysis failed for {}: {}", c["symbol"], e)
@@ -297,18 +301,32 @@ def format_ideas_report(ideas: list[dict]) -> str:
     lines = [f"Scan complete — {len(ideas)} trade ideas for tomorrow:\n"]
     for i, idea in enumerate(ideas, 1):
         conf_emoji = {"High": "🔥", "Medium": "⚡", "Low": "💡"}.get(idea["confidence"], "•")
-        gap_str = f"  Gap: {idea['gap_pct']:+.1f}%" if abs(idea["gap_pct"]) > 0.5 else ""
+        gap_str  = f"  Gap: {idea['gap_pct']:+.1f}%" if abs(idea["gap_pct"]) > 0.5 else ""
         earn_str = "  ⚠️ Earnings soon" if idea["earnings_soon"] else ""
         stop_str = f"${idea['stop']:.2f}" if idea.get("stop") else "TBD"
         tgt_str  = f"${idea['target']:.2f}" if idea.get("target") else "TBD"
+        rs_val   = idea.get("rs", 0)
+        rs_str   = f"  RS: {rs_val:+.1f}" if rs_val else ""
+        vcp_val  = idea.get("vcp", 0)
+        vcp_str  = f"  MF: {vcp_val:.0f}/100" if vcp_val else ""
         kelly_str = _kelly_note(idea)
         sec_str   = f"  Sector: {idea.get('sec_note','')}" if not idea.get("sec_ok") else ""
+        # Calculate R:R ratio for display
+        price = idea.get("price", 0)
+        stop  = idea.get("stop", 0)
+        tgt   = idea.get("target", 0)
+        rr_str = ""
+        if price and stop and tgt and price > stop:
+            risk   = price - stop
+            reward = tgt - price
+            rr_str = f"  R:R {reward/risk:.1f}x" if risk > 0 else ""
         lines.append(
             f"{i}. {conf_emoji} {idea['symbol']} — {idea['recommendation']} @ ${idea['price']:.2f}"
-            f"\n   Confidence: {idea['confidence']} | Score: {idea['score']}/100 | RSI: {idea['rsi']:.0f} | Trend: {idea['trend']}"
-            f"\n   Stop: {stop_str}  Target: {tgt_str}{gap_str}{earn_str}{sec_str}"
+            f"\n   Confidence: {idea['confidence']} | Score: {idea['score']}/100"
+            f" | RSI: {idea['rsi']:.0f} | Trend: {idea['trend']}{vcp_str}{rs_str}"
+            f"\n   Stop: {stop_str}  Target: {tgt_str}{rr_str}{gap_str}{earn_str}{sec_str}"
             f"\n{kelly_str}"
-            f"\n   {idea['reasoning'][:180]}\n"
+            f"\n   {idea['reasoning'][:200]}\n"
         )
     return "\n".join(lines)
 

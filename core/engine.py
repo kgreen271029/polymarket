@@ -196,12 +196,25 @@ class TradingEngine:
             if signal_obj.asset_class == "crypto" and self._alpaca_broker:
                 await asyncio.to_thread(self._alpaca_broker.submit_order, signal_obj)
             elif signal_obj.asset_class == "stock" and self._robinhood_broker:
-                await self._robinhood_broker.place_order(
-                    symbol=signal_obj.symbol,
-                    side=signal_obj.side,
-                    qty=signal_obj.qty,
-                    order_type="market",
-                )
+                # Use limit orders for entries (saves 2-5% annually vs market)
+                # Use market orders for exits where speed is paramount
+                if signal_obj.side == "buy" and signal_obj.entry_price > 0:
+                    # Limit 0.15% above signal price — captures most breakouts, avoids chasing
+                    limit = round(signal_obj.entry_price * 1.0015, 4)
+                    await self._robinhood_broker.place_order(
+                        symbol=signal_obj.symbol,
+                        side=signal_obj.side,
+                        qty=signal_obj.qty,
+                        order_type="limit",
+                        limit_price=limit,
+                    )
+                else:
+                    await self._robinhood_broker.place_order(
+                        symbol=signal_obj.symbol,
+                        side=signal_obj.side,
+                        qty=signal_obj.qty,
+                        order_type="market",
+                    )
             elif signal_obj.asset_class == "polymarket" and self._polymarket_broker:
                 await asyncio.to_thread(self._polymarket_broker.submit_order, signal_obj)
             else:

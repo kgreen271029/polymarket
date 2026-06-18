@@ -25,6 +25,11 @@ class Position:
     strategy_name: str
     opened_at: datetime
     order_id: str
+    highest_price: float = field(default=0.0)  # for chandelier/trailing stop tracking
+
+    def __post_init__(self) -> None:
+        if self.highest_price == 0.0:
+            self.highest_price = self.entry_price
 
     @property
     def unrealized_pnl(self) -> float:
