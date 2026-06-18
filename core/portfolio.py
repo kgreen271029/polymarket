@@ -192,12 +192,31 @@ class PortfolioTracker:
         """Seed portfolio state from live Robinhood account on startup."""
         try:
             port = await rh_broker.get_portfolio()
-            cash = float(port.get("data", {}).get("buying_power", {}).get("buying_power", 0) or 0)
-            self.cash = cash
-            logger.info("[Portfolio] Synced cash from Robinhood: ${:.2f}", cash)
+            cash = 0.0
+            if isinstance(port, dict):
+                # Try multiple response shapes the MCP may return
+                cash = (
+                    float(port.get("data", {}).get("buying_power", {}).get("buying_power", 0) or 0)
+                    or float(port.get("buying_power", 0) or 0)
+                )
+            if cash > 0:
+                self.cash = cash
+                logger.info("[Portfolio] Synced cash from Robinhood: ${:.2f}", cash)
+            else:
+                logger.warning("[Portfolio] Could not read buying power from Robinhood — keeping starting capital ${:.2f}", self.cash)
 
-            pos_data = await rh_broker.get_positions()
-            positions_list = pos_data.get("data", {}).get("positions", [])
+            pos_raw = await rh_broker.get_positions()
+            # get_positions() may return a list directly or a dict with a positions key
+            if isinstance(pos_raw, list):
+                positions_list = pos_raw
+            elif isinstance(pos_raw, dict):
+                positions_list = (
+                    pos_raw.get("positions")
+                    or pos_raw.get("data", {}).get("positions", [])
+                    or []
+                )
+            else:
+                positions_list = []
             now = datetime.now(tz=timezone.utc)
             for p in positions_list:
                 sym = p.get("symbol", "")

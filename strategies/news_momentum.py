@@ -90,25 +90,43 @@ class NewsMomentum(BaseStrategy):
                 if price <= 0:
                     continue
 
-                from analysis.ai_analyzer import AnalysisContext
-                context = AnalysisContext(
-                    symbol=symbol,
-                    asset_class="stock",
-                    strategy_name=self.name,
-                    proposed_action="BUY",
-                    signal_summary={"latest_close": price, "rsi": 50},
-                    news_headlines=[event.title],
-                    available_capital=self._portfolio.get_available_capital(),
-                    open_position_count=len(self._portfolio.positions),
-                    daily_pnl_pct=self._portfolio.daily_pnl,
-                )
-                decision = await self._ai.analyze(context)
+                # High-conviction breaking news: skip AI gate and trade directly
+                is_breaking = score.score >= 0.65 and event.urgency_score >= 0.85
+                stop   = round(price * 0.96, 2)
+                target = round(price * 1.08, 2)
+                ai_confidence = "High" if score.score >= 0.65 else "Medium"
 
-                if decision.recommendation != "BUY":
-                    continue
-
-                stop = decision.stop_price or round(price * 0.96, 2)
-                target = decision.take_profit or round(price * 1.08, 2)
+                if not is_breaking:
+                    from analysis.ai_analyzer import AnalysisContext
+                    # Translate news quality into technical-equivalent signals so the
+                    # rule-based fallback (no Groq key) can score this correctly.
+                    context = AnalysisContext(
+                        symbol=symbol,
+                        asset_class="stock",
+                        strategy_name=self.name,
+                        proposed_action="BUY",
+                        signal_summary={
+                            "latest_close": price,
+                            "rsi": 52,
+                            "trend": "uptrend" if score.score >= 0.5 else "sideways",
+                            "macd_direction": "bullish" if score.score >= 0.3 else "neutral",
+                            "volume_ratio": 2.5 if event.urgency_score >= 0.8 else 1.5,
+                            "volume_spike": event.urgency_score >= 0.8,
+                            "breakout_20": score.score >= 0.5 and event.urgency_score >= 0.7,
+                            "price_vs_sma20_pct": 0.5,
+                            "atr": price * 0.02,
+                        },
+                        news_headlines=[event.title],
+                        available_capital=self._portfolio.get_available_capital(),
+                        open_position_count=len(self._portfolio.positions),
+                        daily_pnl_pct=self._portfolio.daily_pnl,
+                    )
+                    decision = await self._ai.analyze(context)
+                    if decision.recommendation != "BUY":
+                        continue
+                    stop   = decision.stop_price or stop
+                    target = decision.take_profit or target
+                    ai_confidence = decision.confidence
 
                 cash = self._portfolio.get_available_capital()
                 max_dollars = min(cash * 0.20, 20.0)
@@ -117,6 +135,11 @@ class NewsMomentum(BaseStrategy):
                     continue
 
                 force_swing = self._portfolio.get_day_trade_count() >= 3
+                reasoning = (
+                    f"Breaking: {event.title[:80]}"
+                    if is_breaking
+                    else f"{event.title[:60]} | {decision.reasoning}"
+                )
                 signal = TradeSignal(
                     symbol=symbol,
                     side="buy",
@@ -125,8 +148,8 @@ class NewsMomentum(BaseStrategy):
                     entry_price=price,
                     stop_price=stop,
                     take_profit=target,
-                    confidence=decision.confidence,
-                    reasoning=f"{event.title[:80]} | {decision.reasoning}",
+                    confidence=ai_confidence,
+                    reasoning=reasoning,
                     qty=qty,
                     metadata={"force_swing": force_swing, "news_url": event.raw_url},
                 )
