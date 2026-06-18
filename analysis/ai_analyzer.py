@@ -54,16 +54,20 @@ class AIDecision:
 # System prompt
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """You are an expert quantitative trading analyst. Validate trade signals and return structured JSON.
+_SYSTEM_PROMPT = """You are an expert quantitative swing trading analyst (Minervini SEPA + O'Neil CANSLIM methodology).
+Validate trade signals and return structured JSON.
 
 RULES:
 1. Always respond with a single valid JSON object — no markdown, no prose outside JSON.
 2. Required keys:
    {"recommendation":"BUY"|"SELL"|"HOLD","confidence":"High"|"Medium"|"Low","stop_price":<number|null>,"take_profit":<number|null>,"reasoning":"1-2 sentences","risk_factors":["..."],"news_relevance":"positive"|"negative"|"neutral"}
-3. stop_price and take_profit must give at least 1.5:1 reward-to-risk ratio.
-4. High = strong confluence across technicals+trend+news. Medium = mixed. Low = contradictory → HOLD.
-5. RSI>75 overbought, RSI<25 oversold. Volume spike + breakout_20 = strong confirmation.
-6. If daily P&L already down >3%, lean HOLD unless signals are exceptional."""
+3. Use 2.2×ATR for stop (below entry) and 3.3×ATR for target — must achieve ≥1.5:1 R:R.
+4. High = VCP setup + Stage-2 uptrend + volume expansion + MACD bullish. Medium = 2-3 of those. Low → HOLD.
+5. RSI 38-65 is the sweet spot for swing buys. RSI>72 = overextended, lean HOLD/SELL.
+6. Volume must exceed 1.3× average for a valid signal; 2.0×+ = high conviction.
+7. If daily P&L already down >3%, lean HOLD unless signals are exceptional.
+8. VCP score ≥0.7 = strong volatility contraction setup; regime=bull = full size.
+9. For SELL signals: RSI>72, price >4% above 20-SMA, or bearish divergence on RSI."""
 
 
 # ---------------------------------------------------------------------------
@@ -176,40 +180,58 @@ class AIAnalyzer:
     def _rule_based_decision(ctx: AnalysisContext) -> AIDecision:
         """
         Pure technical rules when AI is unavailable.
-        Conservative — only BUYs on strong multi-factor confluence.
+        Uses ATR-based stops/targets and multi-factor scoring.
         """
         sig = ctx.signal_summary
-        rsi = sig.get("rsi", 50)
-        macd = sig.get("macd_direction", "neutral")
-        trend = sig.get("trend", "sideways")
-        vol = sig.get("volume_ratio", 1.0)
+        rsi      = sig.get("rsi", 50)
+        macd     = sig.get("macd_direction", "neutral")
+        trend    = sig.get("trend", "sideways")
+        vol      = sig.get("volume_ratio", 1.0)
         breakout = sig.get("breakout_20", False)
-        bb_pct = sig.get("bb_pct", 0.5)
-        price = sig.get("latest_close", 0)
+        price    = sig.get("latest_close", 0)
+        atr      = sig.get("atr", price * 0.02) if price > 0 else 0
+        vcp      = sig.get("vcp_score", 0)
+        pct_sma  = sig.get("price_vs_sma20_pct", 0)
 
-        score = 0
-        if trend == "uptrend":   score += 2
-        if macd == "bullish":    score += 2
-        if breakout:             score += 2
-        if vol > 1.5:            score += 1
-        if 40 < rsi < 65:        score += 1
+        # ATR-based stop and target (consistent with live strategy)
+        stop   = round(price - 2.2 * atr, 2) if atr and price else None
+        target = round(price + 3.3 * atr, 2) if atr and price else None
 
         if ctx.daily_pnl_pct < -3:
             return AIDecision("HOLD", "Low", None, None,
                               "Daily loss limit caution — rule-based hold", ["daily_loss_caution"])
 
-        if score >= 6 and ctx.proposed_action == "BUY":
-            stop = round(price * 0.96, 2)
-            target = round(price * 1.08, 2)
-            conf = "High" if score >= 7 else "Medium"
+        # BUY scoring (SEPA/CANSLIM inspired)
+        buy_score = 0
+        if trend == "uptrend":        buy_score += 2
+        if macd == "bullish":         buy_score += 2
+        if breakout:                  buy_score += 2
+        if vol > 1.5:                 buy_score += 2
+        elif vol > 1.3:               buy_score += 1
+        if 40 <= rsi <= 60:           buy_score += 2
+        elif 35 <= rsi < 40:          buy_score += 1
+        if vcp >= 0.7:                buy_score += 2
+        elif vcp >= 0.5:              buy_score += 1
+        if 0 < pct_sma < 2.5:         buy_score += 1
+
+        # SELL / overbought scoring
+        sell_score = 0
+        if rsi > 72:                  sell_score += 3
+        if pct_sma > 5.0:             sell_score += 2
+        if trend == "downtrend":      sell_score += 2
+        if macd == "bearish":         sell_score += 2
+
+        if sell_score >= 5:
+            return AIDecision("SELL", "Medium", None, None,
+                              f"Rule-based SELL: RSI={rsi:.0f}, pct_sma={pct_sma:.1f}%, trend={trend}")
+
+        if buy_score >= 8 and ctx.proposed_action == "BUY":
+            conf = "High" if buy_score >= 10 else "Medium"
             return AIDecision("BUY", conf, stop, target,
-                              f"Rule-based: score={score}/8, trend={trend}, MACD={macd}, vol={vol:.1f}x")
-        elif score <= 2:
-            return AIDecision("HOLD", "Low", None, None,
-                              f"Rule-based: weak signals, score={score}/8")
-        else:
-            return AIDecision("HOLD", "Low", None, None,
-                              f"Rule-based: insufficient confluence, score={score}/8")
+                              f"Rule-based BUY: score={buy_score}/15, VCP={vcp:.2f}, vol={vol:.1f}x, trend={trend}")
+
+        return AIDecision("HOLD", "Low", None, None,
+                          f"Rule-based HOLD: buy_score={buy_score}/15 insufficient")
 
     # ------------------------------------------------------------------ #
     # Message builders                                                     #
@@ -219,12 +241,17 @@ class AIAnalyzer:
     def _build_user_message(ctx: AnalysisContext) -> str:
         sig = ctx.signal_summary
         headlines = "\n".join(f"  • {h}" for h in ctx.news_headlines[:8]) or "  None"
+        vcp_str    = f"  VCP={sig.get('vcp_score',0):.2f}" if sig.get("vcp_score") else ""
+        regime_str = f"  Regime={sig.get('regime','unknown')}" if sig.get("regime") else ""
+        sector_str = f"  SectorOK={sig.get('sector_ok','?')}" if "sector_ok" in sig else ""
+        atr_str    = f"  ATR={sig.get('atr',0):.4f}" if sig.get("atr") else ""
         return (
             f"ASSET: {ctx.symbol} ({ctx.asset_class})  STRATEGY: {ctx.strategy_name}  ACTION: {ctx.proposed_action}\n\n"
             f"TECHNICALS:\n"
             f"  RSI={sig.get('rsi',50):.1f}  MACD={sig.get('macd_direction','?')}  BB%={sig.get('bb_pct',0.5):.2f}\n"
             f"  VWAP_delta={sig.get('vwap_delta_pct',0):+.2f}%  Volume={sig.get('volume_ratio',1):.1f}x  Spike={sig.get('volume_spike',False)}\n"
-            f"  Trend={sig.get('trend','?')}  Breakout20={sig.get('breakout_20',False)}  Price=${sig.get('latest_close',0):.4f}\n\n"
+            f"  Trend={sig.get('trend','?')}  Breakout20={sig.get('breakout_20',False)}  Price=${sig.get('latest_close',0):.4f}\n"
+            f"  SMA20_delta={sig.get('price_vs_sma20_pct',0):+.1f}%{vcp_str}{atr_str}{regime_str}{sector_str}\n\n"
             f"NEWS:\n{headlines}\n\n"
             f"PORTFOLIO: ${ctx.available_capital:.0f} available  {ctx.open_position_count} positions  P&L={ctx.daily_pnl_pct:+.1f}%"
         )
