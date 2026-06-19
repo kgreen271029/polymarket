@@ -1,51 +1,63 @@
-"""AI-powered market analysis using Claude and Groq."""
+"""AI-powered market analysis using Groq (FREE!)."""
 
 import os
 import logging
 import json
-from anthropic import Anthropic
+
+try:
+    from groq import Groq
+except ImportError:
+    Groq = None
 
 
 class MarketAnalyzer:
-    """Analyzes market data and generates trading signals."""
+    """Analyzes market data and generates trading signals using Groq."""
 
     def __init__(self, logger):
         self.logger = logger
-        self.client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-        self.model = "claude-3-5-sonnet-20241022"
+        self.groq_key = os.getenv("GROQ_API_KEY")
+        self.client = None
+        self.model = "mixtral-8x7b-32768"
+
+        if self.groq_key and Groq:
+            try:
+                self.client = Groq(api_key=self.groq_key)
+                self.logger.info("✅ Groq AI loaded (FREE tier)")
+            except Exception as e:
+                self.logger.warning(f"Groq not available: {e}")
+                self.client = None
 
     def analyze_stock(self, symbol, price_history, news, technical_indicators):
-        """Analyze a stock using Claude."""
+        """Analyze a stock using Groq (FREE AI)."""
+        if not self.client:
+            return self._fallback_analysis(symbol, price_history)
+
         try:
             context = self._build_analysis_context(
                 symbol, price_history, news, technical_indicators
             )
 
-            message = self.client.messages.create(
+            message = self.client.chat.completions.create(
                 model=self.model,
-                max_tokens=1024,
                 messages=[
                     {
                         "role": "user",
                         "content": context
                     }
-                ]
+                ],
+                temperature=0.3,
+                max_tokens=500,
             )
 
-            response_text = message.content[0].text
+            response_text = message.choices[0].message.content
 
             # Parse the response
             analysis = self._parse_analysis(response_text)
             return analysis
 
         except Exception as e:
-            self.logger.error(f"Failed to analyze {symbol}: {e}")
-            return {
-                "symbol": symbol,
-                "recommendation": "HOLD",
-                "confidence": 0.0,
-                "reasoning": str(e)
-            }
+            self.logger.warning(f"Groq analysis failed for {symbol}, using fallback: {e}")
+            return self._fallback_analysis(symbol, price_history)
 
     def _build_analysis_context(self, symbol, price_history, news, indicators):
         """Build analysis context for Claude."""
@@ -122,24 +134,67 @@ Respond in JSON format:
 
     def get_eod_summary(self, daily_trades, portfolio_value, pnl):
         """Generate end-of-day summary."""
+        if not self.client:
+            return f"EOD: {len(daily_trades)} trades, Portfolio: ${portfolio_value:.2f}, P&L: ${pnl:.2f}"
+
         try:
-            context = f"""
-Generate a brief end-of-day trading summary:
-- Trades executed: {len(daily_trades)}
-- Portfolio value: ${portfolio_value:.2f}
+            context = f"""Generate brief EOD summary:
+- Trades: {len(daily_trades)}
+- Portfolio: ${portfolio_value:.2f}
 - Daily P&L: ${pnl:.2f}
 
-Provide actionable insights for tomorrow.
-"""
+Be concise."""
 
-            message = self.client.messages.create(
+            message = self.client.chat.completions.create(
                 model=self.model,
-                max_tokens=512,
-                messages=[{"role": "user", "content": context}]
+                messages=[{"role": "user", "content": context}],
+                temperature=0.3,
+                max_tokens=200,
             )
 
-            return message.content[0].text
+            return message.choices[0].message.content
 
         except Exception as e:
-            self.logger.error(f"Failed to generate EOD summary: {e}")
+            self.logger.debug(f"EOD summary generation failed: {e}")
             return f"Daily P&L: ${pnl:.2f}"
+
+    def _fallback_analysis(self, symbol, price_history):
+        """Simple technical analysis fallback when AI is unavailable."""
+        if not price_history or len(price_history) < 2:
+            return {
+                "symbol": symbol,
+                "recommendation": "HOLD",
+                "confidence": 0,
+                "reasoning": "Insufficient price data"
+            }
+
+        current_price = price_history[-1]
+        prev_price = price_history[-2]
+
+        # Simple momentum: if price going up, consider buying
+        change_pct = ((current_price - prev_price) / prev_price) * 100
+
+        if change_pct > 2:  # Up >2%, might be bullish
+            return {
+                "symbol": symbol,
+                "recommendation": "BUY",
+                "confidence": 60,
+                "reasoning": f"Price up {change_pct:.2f}% - momentum signal",
+                "stop_loss": current_price * 0.95,
+                "target_price": current_price * 1.05,
+                "entry_price": current_price
+            }
+        elif change_pct < -2:  # Down >2%, might be bearish
+            return {
+                "symbol": symbol,
+                "recommendation": "SELL",
+                "confidence": 50,
+                "reasoning": f"Price down {change_pct:.2f}% - trend reversal signal"
+            }
+        else:
+            return {
+                "symbol": symbol,
+                "recommendation": "HOLD",
+                "confidence": 40,
+                "reasoning": f"Price change {change_pct:.2f}% - no clear signal"
+            }
