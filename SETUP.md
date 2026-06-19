@@ -1,56 +1,49 @@
-# 🤖 FREE Trading Bot - Phone Setup (2 minutes!)
+# 🤖 100% FREE Trading Bot - ZERO Setup Required!
 
-## What You Need (ONLY 1 thing for free trading!)
+## ✅ What You Need (NOTHING!)
 
-### ✅ GROQ API KEY (FREE - Required)
-This is a FREE AI service. Takes 1 minute on your phone:
+Bot uses **FREE technical analysis** - no API keys needed at all!
 
-1. **Open this link on your phone:**
-   ```
-   https://console.groq.com/keys
-   ```
-
-2. **Sign up** with your email (takes 30 seconds)
-
-3. **Copy your API key** (looks like: `gsk_xxxxxxxxxxxxx`)
-
-4. **Send it to Claude** and ask to set it in your .env file, OR:
-   - Open a terminal and run:
-   ```bash
-   echo "GROQ_API_KEY=gsk_your_key_here" >> .env
-   ```
-   (Replace `gsk_your_key_here` with your actual key)
-
-That's it! 🎉
+Just runs and analyzes stocks automatically using momentum & trend strategies.
 
 ---
 
-## 🚀 Bot Now Running FREE!
+## 🚀 Bot Already Running!
 
 The bot will:
-- ✅ Analyze stocks every 5 minutes (using FREE Groq AI)
-- ✅ Generate BUY/SELL signals 
-- ✅ Run in dry-run mode (simulated trades)
+- ✅ Analyze stocks every 5 minutes (100% FREE)
+- ✅ Generate BUY/SELL signals using technical rules
 - ✅ Keep running all day (watchdog)
+- ✅ Stop at 4 PM ET (market close)
+
+**Currently in DRY-RUN MODE** (simulated trades)
 
 ---
 
-## Optional: Real Trading Setup
+## 📱 For REAL TRADES (on your phone)
 
-### Robinhood Trading (Add Later)
-To actually execute trades, you need Robinhood credentials:
+To execute ACTUAL trades, you need Robinhood credentials:
 
-1. **In Robinhood app on your phone:**
-   - Settings → Security → API Settings
-   - Generate MCP Token
-   - Copy the token
+### Step 1: Log into Robinhood on Phone
+1. Open **Robinhood app** on your phone
+2. Go to: **Account** → **Settings** → **Security & Privacy**
+3. Look for **"API" or "Developer Settings"**
 
-2. **Tell Claude:** "Set my Robinhood MCP token to: [your-token]"
+### Step 2: Get Your API Credentials
+You need these 3 values:
+- **ROBINHOOD_MCP_TOKEN**
+- **ROBINHOOD_REFRESH_TOKEN**  
+- **ROBINHOOD_CLIENT_ID**
 
-3. **Telegram Alerts (Optional):**
-   - Create a Telegram bot with BotFather
-   - Get your Chat ID
-   - Tell Claude: "Set my Telegram token"
+### Step 3: Tell Claude to Add Them
+Send me a message with all 3 values and I'll set them up for real trades!
+
+```
+Set my Robinhood creds:
+MCP_TOKEN: xxx
+REFRESH_TOKEN: yyy
+CLIENT_ID: zzz
+```
 
 ---
 
@@ -63,19 +56,18 @@ bash monitor.sh
 
 ---
 
-## ✨ Features Unlocked
+## Features
 
-| Feature | Free | Paid |
-|---------|------|------|
-| AI Analysis | ✅ Groq (FREE) | Anthropic |
-| Dry Run | ✅ Yes | Yes |
-| Real Trading | ❌ (need Robinhood) | ✅ Yes |
-| Alerts | ❌ (need Telegram) | ✅ Yes |
+| Feature | Status |
+|---------|--------|
+| **AI Analysis** | ✅ FREE Technical Rules |
+| **Dry Run Mode** | ✅ Running Now |
+| **Real Trading** | ⏳ Need Robinhood creds |
+| **Auto-Restart** | ✅ Watchdog Active |
+| **24/7 Monitoring** | ✅ Running |
 
 ---
 
-## Need Help?
+## That's It!
 
-Already running in **DRY-RUN MODE** analyzing stocks with FREE Groq AI! 🚀
-
-Just add your Groq key and it's fully functional!
+**Zero setup = bot running FREE right now! 🚀**

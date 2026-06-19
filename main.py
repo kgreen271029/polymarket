@@ -72,19 +72,19 @@ def main():
 
 
 def validate_environment(logger):
-    """Validate that all required environment variables are set."""
-    required_vars = [
+    """Validate environment - no API keys needed for technical analysis!"""
+    logger.info("✅ Technical analysis ready (100% FREE - no API keys required)")
+
+    # Robinhood creds are optional - will use dry-run if not provided
+    robinhood_vars = [
         "ROBINHOOD_MCP_TOKEN",
         "ROBINHOOD_REFRESH_TOKEN",
         "ROBINHOOD_CLIENT_ID",
-        "ANTHROPIC_API_KEY",
     ]
 
-    missing = [var for var in required_vars if not os.getenv(var)]
-
-    if missing:
-        logger.warning(f"Missing environment variables: {', '.join(missing)}")
-        logger.warning("Bot will attempt to run but may fail on trade execution")
+    if not all(os.getenv(var) for var in robinhood_vars):
+        logger.warning("⚠️  Robinhood credentials not found - running in DRY-RUN mode")
+        logger.info("📱 To enable REAL TRADES, add Robinhood API credentials to .env")
 
 
 if __name__ == "__main__":
