@@ -6,11 +6,6 @@ from datetime import datetime
 import pytz
 import requests
 
-try:
-    import robin_stocks.robinhood as rh
-except ImportError:
-    rh = None
-
 
 class MarketManager:
     """Manages market data and trading operations via Robinhood."""
@@ -19,12 +14,24 @@ class MarketManager:
         self.logger = logger
         self.authenticated = False
         self.account_info = None
+        self.rh = None
+        self._init_robinhood()
         self.authenticate()
+
+    def _init_robinhood(self):
+        """Lazy load robin_stocks to avoid import errors."""
+        try:
+            import robin_stocks.robinhood as rh
+            self.rh = rh
+            self.logger.info("robin_stocks module loaded")
+        except (ImportError, RuntimeError, Exception) as e:
+            self.logger.warning(f"robin_stocks not available, using dry-run mode")
+            self.rh = None
 
     def authenticate(self):
         """Authenticate with Robinhood API."""
-        if rh is None:
-            self.logger.warning("robin_stocks not installed, trading disabled")
+        if self.rh is None:
+            self.logger.warning("Robinhood API not available, using dry-run mode")
             return
 
         try:
@@ -32,7 +39,7 @@ class MarketManager:
             client_id = os.getenv("ROBINHOOD_CLIENT_ID")
 
             if mcp_token and client_id:
-                rh.login(
+                self.rh.login(
                     username=None,
                     password=None,
                     mfa_code=None,
@@ -64,11 +71,11 @@ class MarketManager:
 
     def get_account_info(self):
         """Get account information."""
-        if not self.authenticated or rh is None:
+        if not self.authenticated or self.rh is None:
             return None
 
         try:
-            self.account_info = rh.account.get_account()
+            self.account_info = self.rh.account.get_account()
             return self.account_info
         except Exception as e:
             self.logger.error(f"Failed to get account info: {e}")
@@ -76,7 +83,7 @@ class MarketManager:
 
     def get_portfolio_value(self):
         """Get total portfolio value."""
-        if not self.authenticated or rh is None:
+        if not self.authenticated or self.rh is None:
             return float(os.getenv("STARTING_CAPITAL", 92.65))
 
         try:
@@ -90,11 +97,11 @@ class MarketManager:
 
     def get_stock_price(self, symbol):
         """Get current price for a stock."""
-        if not self.authenticated or rh is None:
+        if not self.authenticated or self.rh is None:
             return None
 
         try:
-            quote = rh.stocks.get_quotes(symbol)[0]
+            quote = self.rh.stocks.get_quotes(symbol)[0]
             if quote and "last_trade_price" in quote:
                 return float(quote["last_trade_price"])
         except Exception as e:
@@ -104,11 +111,11 @@ class MarketManager:
 
     def get_holdings(self):
         """Get current stock holdings."""
-        if not self.authenticated or rh is None:
+        if not self.authenticated or self.rh is None:
             return []
 
         try:
-            positions = rh.account.get_positions()
+            positions = self.rh.account.get_positions()
             return [
                 {
                     "symbol": pos.get("symbol"),
@@ -123,12 +130,12 @@ class MarketManager:
 
     def buy_stock(self, symbol, quantity):
         """Execute a buy order."""
-        if not self.authenticated or rh is None:
+        if not self.authenticated or self.rh is None:
             self.logger.warning(f"[DRY RUN] Would buy {quantity} shares of {symbol}")
             return True
 
         try:
-            result = rh.stocks.order_buy_market(symbol, quantity)
+            result = self.rh.stocks.order_buy_market(symbol, quantity)
             self.logger.info(f"Buy order placed: {quantity} shares of {symbol}")
             return True
         except Exception as e:
@@ -137,12 +144,12 @@ class MarketManager:
 
     def sell_stock(self, symbol, quantity):
         """Execute a sell order."""
-        if not self.authenticated or rh is None:
+        if not self.authenticated or self.rh is None:
             self.logger.warning(f"[DRY RUN] Would sell {quantity} shares of {symbol}")
             return True
 
         try:
-            result = rh.stocks.order_sell_market(symbol, quantity)
+            result = self.rh.stocks.order_sell_market(symbol, quantity)
             self.logger.info(f"Sell order placed: {quantity} shares of {symbol}")
             return True
         except Exception as e:

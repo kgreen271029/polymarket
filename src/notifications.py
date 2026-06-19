@@ -4,10 +4,7 @@ import os
 import logging
 import asyncio
 
-try:
-    from telegram import Bot
-except ImportError:
-    Bot = None
+Bot = None
 
 
 class NotificationManager:
@@ -18,13 +15,19 @@ class NotificationManager:
         self.telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
         self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.bot = None
+        self._init_telegram()
 
-        if self.telegram_token and self.telegram_chat_id and Bot:
-            try:
-                self.bot = Bot(token=self.telegram_token)
-                self.logger.info("Telegram notifications enabled")
-            except Exception as e:
-                self.logger.warning(f"Failed to initialize Telegram: {e}")
+    def _init_telegram(self):
+        """Lazy load Telegram Bot."""
+        if not self.telegram_token or not self.telegram_chat_id:
+            return
+
+        try:
+            from telegram import Bot
+            self.bot = Bot(token=self.telegram_token)
+            self.logger.info("Telegram notifications enabled")
+        except Exception as e:
+            self.logger.debug(f"Telegram not available: {type(e).__name__}")
 
     async def send_trade_alert(self, symbol, action, quantity, price, reason):
         """Send trade execution alert."""
