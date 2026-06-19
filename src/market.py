@@ -128,33 +128,47 @@ class MarketManager:
             self.logger.error(f"Failed to get holdings: {e}")
             return []
 
-    def buy_stock(self, symbol, quantity):
-        """Execute a buy order."""
-        if not self.authenticated or self.rh is None:
-            self.logger.warning(f"[DRY RUN] Would buy {quantity} shares of {symbol}")
-            return True
-
-        try:
-            result = self.rh.stocks.order_buy_market(symbol, quantity)
-            self.logger.info(f"Buy order placed: {quantity} shares of {symbol}")
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to buy {symbol}: {e}")
+    def buy_stock(self, symbol, quantity, paper_trader=None):
+        """Execute a buy order (real or paper)."""
+        price = self.get_stock_price(symbol)
+        if not price:
+            self.logger.error(f"Could not get price for {symbol}")
             return False
 
-    def sell_stock(self, symbol, quantity):
-        """Execute a sell order."""
-        if not self.authenticated or self.rh is None:
-            self.logger.warning(f"[DRY RUN] Would sell {quantity} shares of {symbol}")
+        if self.authenticated and self.rh:
+            try:
+                self.rh.stocks.order_buy_market(symbol, quantity)
+                self.logger.info(f"🔴 REAL BUY: {quantity} {symbol} @ ${price:.2f}")
+                return True
+            except Exception as e:
+                self.logger.error(f"Real trade failed: {e}")
+                return False
+        elif paper_trader:
+            return paper_trader.buy(symbol, quantity, price)
+        else:
+            self.logger.warning(f"[DRY RUN] Would buy {quantity} {symbol} @ ${price:.2f}")
             return True
 
-        try:
-            result = self.rh.stocks.order_sell_market(symbol, quantity)
-            self.logger.info(f"Sell order placed: {quantity} shares of {symbol}")
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to sell {symbol}: {e}")
+    def sell_stock(self, symbol, quantity, paper_trader=None):
+        """Execute a sell order (real or paper)."""
+        price = self.get_stock_price(symbol)
+        if not price:
+            self.logger.error(f"Could not get price for {symbol}")
             return False
+
+        if self.authenticated and self.rh:
+            try:
+                self.rh.stocks.order_sell_market(symbol, quantity)
+                self.logger.info(f"🔴 REAL SELL: {quantity} {symbol} @ ${price:.2f}")
+                return True
+            except Exception as e:
+                self.logger.error(f"Real trade failed: {e}")
+                return False
+        elif paper_trader:
+            return paper_trader.sell(symbol, quantity, price)
+        else:
+            self.logger.warning(f"[DRY RUN] Would sell {quantity} {symbol} @ ${price:.2f}")
+            return True
 
     def get_market_news(self, symbols):
         """Get news for provided symbols."""

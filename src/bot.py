@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import pytz
 
 from src.analyzer import MarketAnalyzer
+from src.paper_trader import PaperTrader
 
 
 class TradingBot:
@@ -18,6 +19,7 @@ class TradingBot:
         self.dry_run = dry_run
         self.logger = logger or logging.getLogger(__name__)
         self.analyzer = MarketAnalyzer(self.logger)
+        self.paper_trader = PaperTrader(self.logger)  # Always use paper trading if no real creds
         self.watchlist = self._load_watchlist()
 
     def _load_watchlist(self):
@@ -104,9 +106,9 @@ class TradingBot:
             self.logger.error(f"Error in analyze_and_trade: {e}")
 
     async def _execute_buy(self, symbol, price, analysis):
-        """Execute a buy order."""
+        """Execute a buy order (real or paper)."""
         try:
-            portfolio_value = self.market_manager.get_portfolio_value()
+            portfolio_value = self.paper_trader.get_portfolio_value({symbol: price})
             stop_loss = analysis.get("stop_loss", price * 0.95)
 
             quantity = self.risk_manager.calculate_position_size(
@@ -117,17 +119,19 @@ class TradingBot:
                 self.logger.warning(f"Position size too small for {symbol}")
                 return
 
-            success = self.market_manager.buy_stock(symbol, quantity)
+            # Execute trade (paper trading if no real credentials)
+            success = self.market_manager.buy_stock(symbol, quantity, self.paper_trader)
 
             if success:
+                summary = self.paper_trader.get_summary({symbol: price})
                 self.logger.info(
-                    f"BUY {quantity} {symbol} @ ${price:.2f} "
-                    f"(SL: ${stop_loss:.2f}, Confidence: {analysis.get('confidence')}%)"
+                    f"📊 Portfolio: ${summary['total_value']:.2f} | "
+                    f"P&L: ${summary['pnl']:.2f} ({summary['pnl_pct']:.1f}%)"
                 )
 
                 await self.notification_manager.send_trade_alert(
                     symbol, "BUY", quantity, price,
-                    f"Confidence: {analysis.get('confidence')}%"
+                    f"Confidence: {analysis.get('confidence')}% | P&L: ${summary['pnl']:.2f}"
                 )
 
         except Exception as e:
@@ -138,27 +142,34 @@ class TradingBot:
         try:
             self.logger.info("Running end-of-day analysis...")
 
-            portfolio_value = self.market_manager.get_portfolio_value()
-            holdings = self.market_manager.get_holdings()
+            # Get paper trading summary
+            summary_dict = self.paper_trader.get_summary({})
 
-            # Get EOD summary from analyzer
-            summary = self.analyzer.get_eod_summary(
-                self.risk_manager.daily_trades,
-                portfolio_value,
-                self.risk_manager.daily_pnl
-            )
+            summary_text = f"""
+📊 **END OF DAY SUMMARY**
 
-            self.logger.info(f"EOD Summary:\n{summary}")
+Trades Executed: {summary_dict['trades_executed']}
+Total Value: ${summary_dict['total_value']:.2f}
+Daily P&L: ${summary_dict['pnl']:.2f}
+Return: {summary_dict['pnl_pct']:.2f}%
+Open Positions: {summary_dict['positions']}
+
+💰 Cash Available: ${summary_dict['cash']:.2f}
+
+Status: {'✅ GREEN' if summary_dict['pnl'] >= 0 else '❌ RED'}
+"""
+
+            self.logger.info(f"EOD Summary:\n{summary_text}")
 
             # Send summary notification
-            await self.notification_manager.send_eod_summary(summary)
+            await self.notification_manager.send_eod_summary(summary_text)
 
-            # Log holdings
-            if holdings:
-                self.logger.info("Current holdings:")
-                for h in holdings:
+            # Log open positions
+            if self.paper_trader.positions:
+                self.logger.info("📈 Open Positions:")
+                for symbol, pos in self.paper_trader.positions.items():
                     self.logger.info(
-                        f"  {h['symbol']}: {h['quantity']} shares @ ${h['average_buy_price']:.2f}"
+                        f"  {symbol}: {pos['quantity']} shares @ ${pos['avg_price']:.2f} avg"
                     )
 
         except Exception as e:
