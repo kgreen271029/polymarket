@@ -1,8 +1,15 @@
-"""Main trading bot logic."""
+"""Main trading bot logic.
 
+Each cycle the bot:
+  1. Re-prices and manages open positions (stop-loss / take-profit / exit signal).
+  2. Scans the watchlist for new BUY candidates using the multi-signal analyzer.
+  3. Ranks candidates by confidence and opens positions within risk limits.
+"""
+
+import os
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 
 from src.analyzer import MarketAnalyzer
@@ -10,7 +17,7 @@ from src.paper_trader import PaperTrader
 
 
 class TradingBot:
-    """Main trading bot that coordinates market analysis and execution."""
+    """Coordinates market analysis, risk, and execution."""
 
     def __init__(self, market_manager, risk_manager, notification_manager, dry_run=False, logger=None):
         self.market_manager = market_manager
@@ -19,158 +26,185 @@ class TradingBot:
         self.dry_run = dry_run
         self.logger = logger or logging.getLogger(__name__)
         self.analyzer = MarketAnalyzer(self.logger)
-        self.paper_trader = PaperTrader(self.logger)  # Always use paper trading if no real creds
+        self.paper_trader = PaperTrader(self.logger)
+        self.live = market_manager.authenticated  # True only with real broker auth
+        self.min_confidence = int(os.getenv("MIN_CONFIDENCE", 50))
+        self.scan_interval = int(os.getenv("SCAN_INTERVAL_SECONDS", 300))
         self.watchlist = self._load_watchlist()
+        self.logger.info(
+            f"Bot ready | mode={'LIVE' if self.live else 'PAPER'} | "
+            f"watchlist={len(self.watchlist)} symbols | min_confidence={self.min_confidence}"
+        )
 
     def _load_watchlist(self):
-        """Load trading watchlist."""
-        # Default watchlist of popular stocks
+        """Load scan universe from watchlist.txt if present, else a liquid default set."""
+        path = os.path.join(os.path.dirname(__file__), "..", "watchlist.txt")
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    syms = [l.strip().upper() for l in f if l.strip() and not l.startswith("#")]
+                if syms:
+                    return syms
+            except Exception as e:
+                self.logger.warning(f"Could not read watchlist.txt: {e}")
+        # Default: large-cap + high-liquidity ETFs across sectors
         return [
-            "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA",
-            "META", "NVDA", "SPY", "QQQ", "IWM"
+            "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA", "AMD",
+            "NFLX", "AVGO", "COST", "PEP", "ADBE", "CRM", "INTC", "QCOM",
+            "JPM", "BAC", "V", "MA", "DIS", "PYPL", "UBER", "SHOP",
+            "SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLE", "SMH",
         ]
+
+    # ---------- main loop ----------
 
     async def run(self):
         """Main trading loop during market hours."""
-        self.logger.info("Trading bot market hours session started")
-
         et = pytz.timezone("US/Eastern")
-        market_open = datetime.now(et).replace(hour=9, minute=30, second=0, microsecond=0)
         market_close = datetime.now(et).replace(hour=16, minute=0, second=0, microsecond=0)
+        self.logger.info("Trading session started")
 
         while True:
             now = datetime.now(et)
-
-            # Check if market is still open
             if now >= market_close:
-                self.logger.info("Market closed. Running EOD analysis...")
+                self.logger.info("Market closed. Running EOD analysis.")
                 await self.run_eod_analysis()
                 break
-
-            # Run analysis every 5 minutes
             await self.analyze_and_trade()
+            await asyncio.sleep(self.scan_interval)
 
-            # Wait before next analysis
-            await asyncio.sleep(300)
+    # ---------- per-cycle work ----------
 
     async def analyze_and_trade(self):
-        """Analyze market and execute trades."""
         try:
-            portfolio_value = self.market_manager.get_portfolio_value()
-            holdings = self.market_manager.get_holdings()
-            num_open_positions = len(holdings)
+            # 1. Manage existing positions first
+            await self._manage_open_positions()
+
+            # 2. Portfolio snapshot
+            prices = self._current_prices(self.paper_trader.positions.keys())
+            portfolio_value = self.paper_trader.get_portfolio_value(prices)
+            num_open = len(self.paper_trader.positions)
 
             self.logger.info(
-                f"Portfolio: ${portfolio_value:.2f} | "
-                f"Open positions: {num_open_positions} | "
-                f"Daily P&L: ${self.risk_manager.daily_pnl:.2f}"
+                f"Portfolio: ${portfolio_value:.2f} | Cash: ${self.paper_trader.cash:.2f} | "
+                f"Open: {num_open} | Daily P&L: ${self.risk_manager.daily_pnl:.2f}"
             )
 
-            # Check if we can trade
-            if not self.risk_manager.can_trade(portfolio_value, num_open_positions):
-                self.logger.warning("Trading conditions not met, skipping analysis")
+            if not self.risk_manager.can_trade(portfolio_value, num_open):
                 return
 
-            # Analyze each stock in watchlist
+            # 3. Scan watchlist for BUY candidates
+            candidates = []
             for symbol in self.watchlist:
-                if num_open_positions >= self.risk_manager.max_open_positions:
+                if symbol in self.paper_trader.positions:
+                    continue  # already holding
+                bars = self.market_manager.get_bars(symbol)
+                if not bars:
+                    continue
+                decision = self.analyzer.analyze(symbol, bars)
+                if decision["recommendation"] == "BUY" and decision["confidence"] >= self.min_confidence:
+                    candidates.append(decision)
+
+            # 4. Best signals first
+            candidates.sort(key=lambda d: d["confidence"], reverse=True)
+            self.logger.info(f"Scan complete: {len(candidates)} BUY candidate(s)")
+
+            for decision in candidates:
+                if len(self.paper_trader.positions) >= self.risk_manager.max_open_positions:
                     break
-
-                try:
-                    # Get price and news
-                    price = self.market_manager.get_stock_price(symbol)
-                    if not price:
-                        continue
-
-                    news = self.market_manager.get_market_news([symbol])
-
-                    # Perform analysis
-                    analysis = self.analyzer.analyze_stock(
-                        symbol=symbol,
-                        price_history=[price],  # Simplified for demo
-                        news=news.get(symbol, []),
-                        technical_indicators={}
-                    )
-
-                    # Check recommendation
-                    if analysis.get("recommendation") == "BUY":
-                        confidence = analysis.get("confidence", 0)
-                        if confidence > 70:
-                            await self._execute_buy(symbol, price, analysis)
-                            num_open_positions += 1
-
-                except Exception as e:
-                    self.logger.error(f"Error analyzing {symbol}: {e}")
+                await self._execute_buy(decision)
 
         except Exception as e:
-            self.logger.error(f"Error in analyze_and_trade: {e}")
+            self.logger.error(f"analyze_and_trade error: {e}", exc_info=True)
 
-    async def _execute_buy(self, symbol, price, analysis):
-        """Execute a buy order (real or paper)."""
+    async def _manage_open_positions(self):
+        """Check each held position against stop-loss, take-profit, and exit signals."""
+        for symbol in list(self.paper_trader.positions.keys()):
+            pos = self.paper_trader.positions[symbol]
+            bars = self.market_manager.get_bars(symbol)
+            if not bars:
+                continue
+            price = bars["price"]
+            stop = pos.get("stop_loss")
+            target = pos.get("target_price")
+
+            reason = None
+            if stop and price <= stop:
+                reason = f"stop-loss hit (${price:.2f} <= ${stop:.2f})"
+            elif target and price >= target:
+                reason = f"target reached (${price:.2f} >= ${target:.2f})"
+            else:
+                decision = self.analyzer.analyze(symbol, bars)
+                if decision["recommendation"] == "SELL":
+                    reason = f"exit signal ({decision['reasoning']})"
+
+            if reason:
+                qty = pos["quantity"]
+                if self.market_manager.sell_stock(symbol, qty, self.paper_trader):
+                    self.logger.info(f"SELL {qty} {symbol} @ ${price:.2f} — {reason}")
+                    await self.notification_manager.send_trade_alert(
+                        symbol, "SELL", qty, price, reason
+                    )
+
+    async def _execute_buy(self, decision):
+        symbol = decision["symbol"]
+        price = decision["entry_price"]
+        stop = decision.get("stop_loss", price * 0.95)
+        target = decision.get("target_price", price * 1.10)
         try:
-            portfolio_value = self.paper_trader.get_portfolio_value({symbol: price})
-            stop_loss = analysis.get("stop_loss", price * 0.95)
-
-            quantity = self.risk_manager.calculate_position_size(
-                portfolio_value, price, stop_loss
-            )
-
+            prices = self._current_prices(self.paper_trader.positions.keys())
+            portfolio_value = self.paper_trader.get_portfolio_value(prices)
+            quantity = self.risk_manager.calculate_position_size(portfolio_value, price, stop)
+            if quantity < 1 or quantity * price > self.paper_trader.cash:
+                # fall back to what cash allows
+                quantity = int(self.paper_trader.cash // price)
             if quantity < 1:
-                self.logger.warning(f"Position size too small for {symbol}")
+                self.logger.info(f"Skip {symbol}: insufficient cash for 1 share (${price:.2f})")
                 return
 
-            # Execute trade (paper trading if no real credentials)
-            success = self.market_manager.buy_stock(symbol, quantity, self.paper_trader)
-
-            if success:
-                summary = self.paper_trader.get_summary({symbol: price})
+            if self.market_manager.buy_stock(symbol, quantity, self.paper_trader):
+                # attach risk levels to the position for later management
+                self.paper_trader.positions[symbol]["stop_loss"] = stop
+                self.paper_trader.positions[symbol]["target_price"] = target
+                self.paper_trader.save_state()
                 self.logger.info(
-                    f"📊 Portfolio: ${summary['total_value']:.2f} | "
-                    f"P&L: ${summary['pnl']:.2f} ({summary['pnl_pct']:.1f}%)"
+                    f"BUY {quantity} {symbol} @ ${price:.2f} "
+                    f"(conf {decision['confidence']}%, stop ${stop:.2f}, target ${target:.2f}) "
+                    f"— {decision['reasoning']}"
                 )
-
                 await self.notification_manager.send_trade_alert(
                     symbol, "BUY", quantity, price,
-                    f"Confidence: {analysis.get('confidence')}% | P&L: ${summary['pnl']:.2f}"
+                    f"Conf {decision['confidence']}% | {decision['reasoning']}"
                 )
-
         except Exception as e:
-            self.logger.error(f"Failed to execute buy for {symbol}: {e}")
+            self.logger.error(f"Buy failed for {symbol}: {e}")
+
+    def _current_prices(self, symbols):
+        """Build a {symbol: price} map for valuation (uses cached bars)."""
+        out = {}
+        for s in symbols:
+            bars = self.market_manager.get_bars(s)
+            if bars:
+                out[s] = bars["price"]
+        return out
+
+    # ---------- end of day ----------
 
     async def run_eod_analysis(self):
-        """Run end-of-day analysis and generate summary."""
         try:
-            self.logger.info("Running end-of-day analysis...")
-
-            # Get paper trading summary
-            summary_dict = self.paper_trader.get_summary({})
-
-            summary_text = f"""
-📊 **END OF DAY SUMMARY**
-
-Trades Executed: {summary_dict['trades_executed']}
-Total Value: ${summary_dict['total_value']:.2f}
-Daily P&L: ${summary_dict['pnl']:.2f}
-Return: {summary_dict['pnl_pct']:.2f}%
-Open Positions: {summary_dict['positions']}
-
-💰 Cash Available: ${summary_dict['cash']:.2f}
-
-Status: {'✅ GREEN' if summary_dict['pnl'] >= 0 else '❌ RED'}
-"""
-
-            self.logger.info(f"EOD Summary:\n{summary_text}")
-
-            # Send summary notification
-            await self.notification_manager.send_eod_summary(summary_text)
-
-            # Log open positions
-            if self.paper_trader.positions:
-                self.logger.info("📈 Open Positions:")
-                for symbol, pos in self.paper_trader.positions.items():
-                    self.logger.info(
-                        f"  {symbol}: {pos['quantity']} shares @ ${pos['avg_price']:.2f} avg"
-                    )
-
+            prices = self._current_prices(self.paper_trader.positions.keys())
+            s = self.paper_trader.get_summary(prices)
+            text = (
+                f"END OF DAY\n"
+                f"Trades: {s['trades_executed']} | Open: {s['positions']}\n"
+                f"Value: ${s['total_value']:.2f} | Cash: ${s['cash']:.2f}\n"
+                f"P&L: ${s['pnl']:.2f} ({s['pnl_pct']:+.2f}%) — "
+                f"{'GREEN' if s['pnl'] >= 0 else 'RED'}"
+            )
+            self.logger.info(text)
+            await self.notification_manager.send_eod_summary(text)
+            for symbol, pos in self.paper_trader.positions.items():
+                self.logger.info(
+                    f"  Holding {pos['quantity']} {symbol} @ ${pos['avg_price']:.2f} avg"
+                )
         except Exception as e:
-            self.logger.error(f"Error in EOD analysis: {e}")
+            self.logger.error(f"EOD error: {e}")

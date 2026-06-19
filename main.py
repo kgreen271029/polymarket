@@ -25,6 +25,7 @@ def main():
     parser = argparse.ArgumentParser(description="Agentic Trading Bot")
     parser.add_argument("--dry-run", action="store_true", help="Run in dry-run mode (no real trades)")
     parser.add_argument("--eod", action="store_true", help="Run end-of-day analysis only")
+    parser.add_argument("--scan", action="store_true", help="Run one analysis/trade cycle and exit (ignores market hours)")
     args = parser.parse_args()
 
     # Setup logging
@@ -49,6 +50,13 @@ def main():
             dry_run=args.dry_run,
             logger=logger
         )
+
+        if args.scan:
+            # One-shot cycle for testing/verification, regardless of market hours
+            logger.info("Running single scan cycle...")
+            asyncio.run(bot.analyze_and_trade())
+            logger.info("Scan cycle complete")
+            return
 
         # Check if market is open
         if not market_manager.is_market_open() and not args.eod:

@@ -1,0 +1,42 @@
+# Trading bot scan universe — one ticker per line.
+# Lines starting with # are ignored. Edit freely.
+# Default set: liquid large-caps + sector ETFs.
+
+# Mega-cap tech
+AAPL
+MSFT
+GOOGL
+AMZN
+META
+NVDA
+AMD
+NFLX
+AVGO
+ADBE
+CRM
+INTC
+QCOM
+
+# Consumer / other large-cap
+COST
+PEP
+DIS
+UBER
+SHOP
+PYPL
+
+# Financials
+JPM
+BAC
+V
+MA
+
+# Broad / sector ETFs (good for smaller accounts)
+SPY
+QQQ
+IWM
+DIA
+XLK
+XLF
+XLE
+SMH

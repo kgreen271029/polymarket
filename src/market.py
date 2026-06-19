@@ -6,15 +6,22 @@ from datetime import datetime
 import pytz
 import requests
 
+from src.data_provider import DataProvider
+
 
 class MarketManager:
-    """Manages market data and trading operations via Robinhood."""
+    """Manages market data and trading operations.
+
+    Price/history data always comes from the free DataProvider (Yahoo Finance,
+    no key). Robinhood is only used for live order execution when authenticated.
+    """
 
     def __init__(self, logger):
         self.logger = logger
         self.authenticated = False
         self.account_info = None
         self.rh = None
+        self.data = DataProvider(logger)
         self._init_robinhood()
         self.authenticate()
 
@@ -96,18 +103,12 @@ class MarketManager:
         return float(os.getenv("STARTING_CAPITAL", 92.65))
 
     def get_stock_price(self, symbol):
-        """Get current price for a stock."""
-        if not self.authenticated or self.rh is None:
-            return None
+        """Get current price for a stock from the free data provider."""
+        return self.data.get_price(symbol)
 
-        try:
-            quote = self.rh.stocks.get_quotes(symbol)[0]
-            if quote and "last_trade_price" in quote:
-                return float(quote["last_trade_price"])
-        except Exception as e:
-            self.logger.error(f"Failed to get price for {symbol}: {e}")
-
-        return None
+    def get_bars(self, symbol, interval="1d", rng="3mo"):
+        """Get OHLCV history for indicator calculation."""
+        return self.data.get_bars(symbol, interval, rng)
 
     def get_holdings(self):
         """Get current stock holdings."""
