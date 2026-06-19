@@ -1,0 +1,10 @@
+anthropic==0.37.0
+groq==0.15.2
+robin-stocks==4.1.0
+python-dotenv==1.0.1
+requests==2.32.3
+pytz==2024.1
+python-telegram-bot==21.1
+aiohttp==3.10.5
+pandas==2.2.2
+numpy==1.26.4

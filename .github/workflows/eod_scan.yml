@@ -15,7 +15,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: claude/agentic-trading-bot-jaqt4l
+          ref: claude/trading-bot-analysis-4l41r6
 
       - name: Set up Python
         uses: actions/setup-python@v5
